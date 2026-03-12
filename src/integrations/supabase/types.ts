@@ -14,7 +14,48 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      pdf_summaries: {
+        Row: {
+          action_items: Json | null
+          created_at: string
+          file_name: string
+          file_size: number | null
+          id: string
+          key_points: Json | null
+          language: string
+          reading_time: string | null
+          summary_length: string
+          tables_formulas: string | null
+          word_count: number | null
+        }
+        Insert: {
+          action_items?: Json | null
+          created_at?: string
+          file_name: string
+          file_size?: number | null
+          id?: string
+          key_points?: Json | null
+          language?: string
+          reading_time?: string | null
+          summary_length?: string
+          tables_formulas?: string | null
+          word_count?: number | null
+        }
+        Update: {
+          action_items?: Json | null
+          created_at?: string
+          file_name?: string
+          file_size?: number | null
+          id?: string
+          key_points?: Json | null
+          language?: string
+          reading_time?: string | null
+          summary_length?: string
+          tables_formulas?: string | null
+          word_count?: number | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
