@@ -26,6 +26,7 @@ export type Database = {
           reading_time: string | null
           summary_length: string
           tables_formulas: string | null
+          user_id: string
           word_count: number | null
         }
         Insert: {
@@ -39,6 +40,7 @@ export type Database = {
           reading_time?: string | null
           summary_length?: string
           tables_formulas?: string | null
+          user_id: string
           word_count?: number | null
         }
         Update: {
@@ -52,6 +54,7 @@ export type Database = {
           reading_time?: string | null
           summary_length?: string
           tables_formulas?: string | null
+          user_id?: string
           word_count?: number | null
         }
         Relationships: []
