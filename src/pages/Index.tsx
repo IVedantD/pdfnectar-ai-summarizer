@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
+import { LogOut } from "lucide-react";
 import DropZone from "@/components/DropZone";
 import LoadingSteps from "@/components/LoadingSteps";
 import SummaryResults from "@/components/SummaryResults";
@@ -9,6 +10,7 @@ import QAResponse from "@/components/QAResponse";
 import HistoryPanel from "@/components/HistoryPanel";
 import beeLogo from "@/assets/bee-logo.png";
 import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 
 type SummaryLength = "short" | "medium" | "detailed";
@@ -35,6 +37,7 @@ const MOCK_ANSWERS: Record<string, string> = {
 };
 
 const Index = () => {
+  const { user, signOut } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [length, setLength] = useState<SummaryLength>("medium");
   const [language, setLanguage] = useState<Language>("en");
@@ -43,10 +46,9 @@ const Index = () => {
   const [qaLoading, setQaLoading] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
-  // Fetch history on mount
   useEffect(() => {
-    fetchHistory();
-  }, []);
+    if (user) fetchHistory();
+  }, [user]);
 
   const fetchHistory = async () => {
     const { data, error } = await supabase
@@ -61,10 +63,12 @@ const Index = () => {
   };
 
   const saveToHistory = async (fileName: string) => {
+    if (!user) return;
     const { error } = await supabase.from("pdf_summaries").insert({
       file_name: fileName,
       summary_length: length,
       language,
+      user_id: user.id,
       key_points: [
         "34% improvement in processing efficiency",
         "Consistent cross-validation results",
@@ -96,7 +100,7 @@ const Index = () => {
     if (file) {
       saveToHistory(file.name);
     }
-  }, [file, length, language]);
+  }, [file, length, language, user]);
 
   const handleReset = () => {
     setFile(null);
@@ -106,7 +110,6 @@ const Index = () => {
 
   const handleAsk = (question: string) => {
     setQaLoading(true);
-    // Simulate AI response
     setTimeout(() => {
       setQaList((prev) => [
         ...prev,
@@ -116,8 +119,7 @@ const Index = () => {
     }, 1500);
   };
 
-  const handleHistorySelect = (id: string) => {
-    // For now, just show a toast - in the future this would load the saved summary
+  const handleHistorySelect = (_id: string) => {
     toast.info("Loading saved summary...");
     setState("results");
     setQaList([]);
@@ -142,8 +144,17 @@ const Index = () => {
         <motion.header
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="text-center mb-8"
+          className="text-center mb-8 relative"
         >
+          <Button
+            variant="ghost"
+            size="sm"
+            className="absolute right-0 top-0 text-muted-foreground hover:text-foreground"
+            onClick={signOut}
+          >
+            <LogOut className="w-4 h-4 mr-1" />
+            Sign out
+          </Button>
           <div className="flex items-center justify-center gap-3 mb-2">
             <img src={beeLogo} alt="PDFNectar bee logo" className="w-10 h-10" />
             <h1 className="text-3xl sm:text-4xl font-display font-bold text-foreground tracking-tight">
@@ -164,7 +175,6 @@ const Index = () => {
         >
           {state === "idle" && (
             <>
-              {/* History */}
               <HistoryPanel
                 items={history}
                 onSelect={handleHistorySelect}
@@ -173,7 +183,6 @@ const Index = () => {
 
               <DropZone onFileSelect={setFile} selectedFile={file} />
 
-              {/* Length Options */}
               <div className="flex gap-2">
                 {([
                   { key: "short", label: "Short (100 words)" },
@@ -192,7 +201,6 @@ const Index = () => {
                 ))}
               </div>
 
-              {/* Language Toggle */}
               <div className="flex items-center justify-center gap-1 bg-secondary rounded-lg p-1">
                 <button
                   onClick={() => setLanguage("en")}
@@ -216,7 +224,6 @@ const Index = () => {
                 </button>
               </div>
 
-              {/* Generate Button */}
               <Button
                 variant="gold"
                 size="lg"
@@ -235,7 +242,6 @@ const Index = () => {
             <>
               <SummaryResults language={language} />
 
-              {/* Q&A Responses */}
               {qaList.map((qa, i) => (
                 <QAResponse key={i} question={qa.question} answer={qa.answer} />
               ))}
@@ -262,7 +268,6 @@ const Index = () => {
           )}
         </motion.main>
 
-        {/* Footer */}
         <motion.footer
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -273,7 +278,6 @@ const Index = () => {
         </motion.footer>
       </div>
 
-      {/* Sticky Search Bar - only visible in results state */}
       {state === "results" && (
         <div className="fixed bottom-0 left-0 right-0 bg-background/80 backdrop-blur-md border-t border-border/50 px-4 py-3">
           <div className="max-w-[600px] mx-auto">
