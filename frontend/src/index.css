@@ -1,8 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
 
 @layer base {
   :root {
@@ -80,5 +80,10 @@
 
   .result-card {
     @apply bg-card rounded-xl p-5 shadow-sm border border-border/50;
+  }
+
+  .source-chip {
+    @apply text-[10px] font-medium bg-muted text-muted-foreground px-2 py-1 rounded-md 
+           cursor-pointer transition-all border border-border/50 hover:bg-primary/20 hover:text-primary hover:border-primary/30;
   }
 }

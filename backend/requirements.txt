@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+langchain-mongodb
+langchain-google-genai
+langchain-core
+langchain
+python-dotenv
+pymongo
+PyMuPDF
+langchain-community
+python-multipart

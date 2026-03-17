@@ -1,73 +1,84 @@
-# Welcome to your Lovable project
+# PDF Nectar AI Summarizer
 
-## Project info
+A full-stack application built to allow users to upload PDF documents, summarize them, and chat with them using Large Language Models and Retrieval Augmented Generation (RAG).
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Architecture
+- **Frontend**: Vite, React (TypeScript), Tailwind CSS, Shadcn UI
+- **Backend**: FastAPI (Python), MongoDB Atlas Vector Search, LangChain, Google Gemini API
 
-## How can I edit this code?
+## Prerequisites
+- Node.js (v18+) and npm/bun
+- Python 3.9+
+- MongoDB Atlas cluster with Vector Search configured
+- Google Gemini API Key
 
-There are several ways of editing your application.
+---
 
-**Use Lovable**
+## 🚀 How to Run the Project Locally
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+To run the full stack, you will need two separate terminal windows: one for the frontend and one for the backend.
 
-Changes made via Lovable will be committed automatically to this repo.
+### 1. Running the Backend
 
-**Use your preferred IDE**
+1. **Navigate to the backend directory:**
+   ```bash
+   cd backend
+   ```
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+2. **Create and activate a virtual environment:**
+   - **Windows:**
+     ```bash
+     python -m venv venv
+     .\venv\Scripts\activate
+     ```
+   - **macOS/Linux:**
+     ```bash
+     python3 -m venv venv
+     source 
+     ```
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Follow these steps:
+4. **Environment Variables:**
+   Ensure you have a `.env` file in the `backend/` directory with the following variables:
+   ```env
+   GEMINI_API_KEY="your_gemini_api_key"
+   MONGO_URI="your_mongodb_cluster_uri"
+   DB_NAME="pdfnectar"
+   COLLECTION_NAME="document_embeddings"
+   ATLAS_VECTOR_SEARCH_INDEX_NAME="vector_index"
+   ```
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+5. **Start the FastAPI server:**
+   ```bash
+   uvicorn main:app --reload --port 8000
+   ```
+   The backend API will run at `http://localhost:8000`. You can access the automatic documentation at `http://localhost:8000/docs`.
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+---
 
-# Step 3: Install the necessary dependencies.
-npm i
+### 2. Running the Frontend
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
-```
+1. **Navigate to the project root directory:**
+   Open a new terminal window in the main project folder.
 
-**Edit a file directly in GitHub**
+2. **Install dependencies (if you haven't already):**
+   ```bash
+   npm install
+   ```
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+3. **Start the Vite development server:**
+   ```bash
+   npm run dev
+   ```
+   The frontend will run at `http://localhost:8080` (or another port provided by Vite in your terminal).
 
-**Use GitHub Codespaces**
+---
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
-
-## What technologies are used for this project?
-
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Features
+- **PDF Upload**: Ingest and process large PDF documents securely.
+- **RAG Architecture**: Automatically chunks and embeds document text into a vector database for rapid semantic retrieval.
+- **Contextual Chat**: Ask detailed questions about your uploaded documents, powered by gemini-1.5-flash.
