@@ -4,8 +4,10 @@ import LoadingSteps from "@/components/LoadingSteps";
 import SummaryResults from "@/components/SummaryResults";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
-import { Loader2 } from "lucide-react"; // Import for loading spinner
+import { Loader2, Send } from "lucide-react";
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type SummaryLength = "short" | "medium" | "detailed";
 type Language = "en" | "hi";
@@ -17,11 +19,6 @@ type ChatMessage = {
   pages?: number[];
   pdfUrl?: string;
 };
-
-const formatMessageContent = (content: string) => {
-  return content;
-};
-
 const Index = () => {
   const [file, setFile] = useState<File | null>(null);
   const [length, setLength] = useState<SummaryLength>("medium");
@@ -176,7 +173,10 @@ FINAL RULES
           query, 
           user_query: "Summarize this document",
           session_id: newSessionId,
-          document_id: newDocId 
+          document_id: newDocId,
+          mode: "summary",
+          language: languageStr,
+          length: length
         })
       });
       
@@ -492,6 +492,8 @@ ${questionText}`;
           user_query: questionText,
           session_id: sessionId,
           document_id: documentId,
+          mode: "chat",
+          language: language === "en" ? "English" : "Hindi"
         }),
       });
 
@@ -645,68 +647,63 @@ ${questionText}`;
                     {chatMessages.map((msg, idx) => (
                       <div
                         key={idx}
-                        className={`flex gap-3 w-full ${
+                        className={`flex gap-4 w-full ${
                           msg.role === "user" ? "justify-end" : "justify-start"
                         }`}
                       >
-                        {msg.role === "ai" && (
-                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-muted flex items-center justify-center text-lg shadow-sm border border-border/50">
-                            🤖
-                          </div>
-                        )}
                         <div
-                          className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                          className={`max-w-[85%] rounded-2xl px-5 py-3.5 text-sm shadow-sm ${
                             msg.role === "user"
-                              ? "bg-yellow-500 text-white rounded-tr-sm"
-                              : "bg-muted text-foreground rounded-tl-sm whitespace-pre-wrap leading-relaxed"
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-card text-card-foreground border border-border/50"
                           }`}
                         >
-                          {msg.role === "ai" ? formatMessageContent(msg.content) : msg.content}
+                          {msg.role === "ai" ? (
+                            <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-p:my-2 prose-ul:my-2 prose-li:my-0.5">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {msg.content}
+                              </ReactMarkdown>
+                            </div>
+                          ) : (
+                            <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                          )}
                           
                           {/* Sources Section */}
                           {msg.role === "ai" && msg.pages && msg.pages.length > 0 && (
-                            <div className="mt-3 pt-3 border-t border-border/50">
-                              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">Sources:</p>
-                              <div className="flex flex-wrap gap-2">
+                            <div className="mt-4 pt-3 border-t border-border/50 flex flex-wrap items-center gap-2">
+                              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Sources:</span>
+                              <div className="flex flex-wrap gap-1.5">
                                 {msg.pages.map((p) => (
-                                  <span
+                                  <button
                                     key={`source-${p}`}
-                                    className="source-chip"
+                                    className="px-2.5 py-0.5 rounded-full bg-secondary text-secondary-foreground text-[10px] font-medium hover:bg-secondary/80 transition-colors border border-border/50"
                                     onClick={() => {
                                       if (msg.pdfUrl) {
                                         window.open(`${msg.pdfUrl}#page=${p}`, "_blank");
                                       }
                                     }}
                                   >
-                                    p{p}
-                                  </span>
+                                    Page {p}
+                                  </button>
                                 ))}
                               </div>
                             </div>
                           )}
                         </div>
-                        {msg.role === "user" && (
-                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-100 dark:bg-yellow-900 border border-yellow-200 dark:border-yellow-800 flex items-center justify-center text-lg shadow-sm">
-                            👤
-                          </div>
-                        )}
                       </div>
                     ))}
                     {isChatLoading && (
-                      <div className="flex gap-3 w-full justify-start">
-                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-muted flex items-center justify-center text-lg shadow-sm border border-border/50">
-                          🤖
-                        </div>
-                        <div className="bg-muted text-muted-foreground rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-2 shadow-sm">
+                      <div className="flex gap-4 w-full justify-start">
+                        <div className="bg-card text-muted-foreground rounded-2xl px-5 py-4 flex items-center gap-3 shadow-sm border border-border/50">
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          <span className="text-sm">Thinking...</span>
+                          <span className="text-sm font-medium">Analyzing document...</span>
                         </div>
                       </div>
                     )}
                   </div>
                 )}
                 
-                <form onSubmit={handleAskQuestion} className="flex gap-2 items-center">
+                <form onSubmit={handleAskQuestion} className="flex gap-2 items-center mt-2 relative">
                   <input
                     type="text"
                     value={currentQuestion}
@@ -717,17 +714,18 @@ ${questionText}`;
                         handleAskQuestion();
                       }
                     }}
-                    placeholder="Ask a question about your PDF..."
-                    className="flex-1 rounded-full border border-input bg-background px-4 py-3 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    placeholder="Ask a question about your document..."
+                    className="w-full rounded-full border border-input bg-card px-5 py-4 pr-14 text-sm shadow-sm transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={isChatLoading}
                   />
                   <Button 
                     type="submit" 
+                    size="icon"
                     variant="gold" 
-                    className="rounded-full px-6 h-11"
+                    className="absolute right-2 top-2 bottom-2 my-auto h-10 w-10 p-0 rounded-full flex items-center justify-center"
                     disabled={isChatLoading || !currentQuestion.trim()}
                   >
-                    Ask
+                    <Send className="h-4 w-4" />
                   </Button>
                 </form>
               </div>

@@ -132,7 +132,8 @@ async def download_pdf(filename: str):
     return FileResponse(
         path=file_path,
         media_type="application/pdf",
-        filename=filename.split("_", 1)[-1] # Strip the UUID for a clean user download name
+        filename=filename.split("_", 1)[-1], # Strip the UUID for a clean user download name
+        content_disposition_type="inline"
     )
 
 
