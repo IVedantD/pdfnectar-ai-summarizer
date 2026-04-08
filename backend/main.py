@@ -21,11 +21,13 @@ app = FastAPI(title="PDFNectar AI Summarizer API", version="1.0.0")
 origins = [
     "http://localhost:5173", # Default Vite port
     "http://localhost:8080", # Alternative Vite port
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,10 +41,28 @@ def read_root():
 def health_check():
     return {"status": "ok"}
 
+def cleanup_old_uploads(upload_dir: str, max_files: int = 50):
+    """Deletes old files if the directory exceeds the max_files limit."""
+    if not os.path.exists(upload_dir):
+        return
+    files = [os.path.join(upload_dir, f) for f in os.listdir(upload_dir) if f.endswith('.pdf')]
+    if len(files) > max_files:
+        files.sort(key=lambda x: os.path.getctime(x))
+        for f in files[:len(files) - max_files]:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Invalid file type. Only standard PDFs are allowed.")
+        
+    if file.size and file.size > MAX_FILE_SIZE:
+         raise HTTPException(status_code=413, detail="File is too large. Max size is 50MB.")
 
     vectorstore = get_vector_store()
     
@@ -57,115 +77,37 @@ async def upload_pdf(file: UploadFile = File(...)):
     safe_filename = f"{document_id}_{file.filename}"
     permanent_path = os.path.join(upload_dir, safe_filename)
     
+    # Trigger cleanup dynamically before saving the new file
+    cleanup_old_uploads(upload_dir)
+    
     try:
-        with open(permanent_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        import aiofiles
+        async with aiofiles.open(permanent_path, "wb") as buffer:
+            await buffer.write(await file.read())
             
-        # We can use the permanent path for PyMuPDFLoader as well
-        tmp_path = permanent_path
+        # Delegate heavy lifting to explicitly tailored service layer
+        from app.services.document_service import DocumentService
+        result = DocumentService.process_and_ingest_pdf(permanent_path, document_id, file.filename)
 
-        # 1. Load the PDF
-        loader = PyMuPDFLoader(tmp_path)
-        documents = loader.load()
-
-        # 2. Split the PDF into chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            add_start_index=True
-        )
-        chunks = text_splitter.split_documents(documents)
+        print(f"\n[UPLOAD] Successfully processed document: {file.filename}")
+        print(f"[UPLOAD] Generated document_id: {document_id}")
         
-        # 3. Add rich metadata: document_id, source_file, and page
-        for chunk in chunks:
-            # PyMuPDFLoader already adds 'page' (0-indexed) to metadata by default
-            # We add document_id and source_file to the existing metadata
-            page_num = chunk.metadata.get('page', 0)
-            # Ensure page is a clean integer representing standard 1-indexed pages for users
-            display_page = int(page_num) + 1 if isinstance(page_num, int) else page_num
-            
-            chunk.metadata.update({
-                'document_id': document_id,
-                'source_file': file.filename,
-                'page': display_page
-            })
-
-        # 4. Ingest into MongoDB Vector Store using Gemini Embeddings
-        inserted_ids = vectorstore.add_documents(chunks)
-
-        # 5. Save metadata using DocumentManager
-        from app.core.document_manager import DocumentManager
-        DocumentManager.save_metadata(document_id, {
-            "original_filename": file.filename,
-            "total_pages": len(documents),
-            "total_chunks": len(chunks)
-        })
-
-        # 6. Generate Suggested Questions based on the initial chunks
-        suggested_questions = []
-        try:
-            # We take the first 3 chunks (or fewer if the document is very small) as sample context
-            sample_text = "\n\n".join([chunk.page_content for chunk in chunks[:3]])
-            
-            # Use Gemini to generate the questions
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_core.messages import SystemMessage, HumanMessage
-            
-            # We use a simple prompt for speed and reliability during upload
-            # T is set slightly higher to get variety in the questions
-            question_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
-            
-            messages = [
-                SystemMessage(content=(
-                    "You are an assistant that helps users understand uploaded documents. "
-                    "Based on the following excerpts from the beginning of a document, generate 3 to 5 insightful "
-                    "questions that a user might want to ask about the text. "
-                    "Output ONLY the questions, with one question per line, starting with a dash (-)."
-                )),
-                HumanMessage(content=f"Document Excerpts:\n{sample_text}")
-            ]
-            
-            response = question_llm.invoke(messages)
-            
-            # Parse the response into a list of strings
-            lines = response.content.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if line.startswith("-") or line.startswith("*"):
-                    # Remove the markdown bullet and clean up whitespace
-                    question = line[1:].strip()
-                    if question:
-                        suggested_questions.append(question)
-                elif line: # Fallback if LLM ignores bullet instructions
-                     suggested_questions.append(line)
-                     
-            # Safety fallback in case of parsing failure or empty generation
-            if not suggested_questions:
-                suggested_questions = [
-                    "What is the main purpose of this document?",
-                    "What are the key findings presented?",
-                    "Could you summarize the main points?"
-                ]
-                
-        except Exception as e:
-            print(f"Warning: Failed to generate suggested questions: {e}")
-            # Do not fail the whole upload just because suggestion generation failed
-            suggested_questions = [
-                "What is the main topic of this document?",
-                "Can you provide a brief summary?",
-                "What are the most important takeaways?"
-            ]
-
         return {
             "document_id": document_id,
             "filename": safe_filename, # Return safe filename for download endpoint
             "original_filename": file.filename,
-            "total_chunks": len(chunks),
-            "total_pages": len(documents),
-            "suggested_questions": suggested_questions[:5] # Enforce max 5
+            "total_chunks": result["total_chunks"],
+            "total_pages": result["total_pages"],
+            "suggested_questions": result["suggested_questions"]
         }
         
+    except ValueError as ve:
+        print(f"Known Processing Error: {str(ve)}")
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
+        import uvicorn
+        # Trigger uvicorn reload to fetch new .env values
+        uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
         import traceback
         print("\n--- ERROR IN /api/upload ---")
         traceback.print_exc()
@@ -209,10 +151,13 @@ from typing import List
 from database import MONGO_URI, DB_NAME
 
 class ChatRequest(BaseModel):
-    query: str
+    query: str = "" # Still accepted but safely ignored by backend
     session_id: str
     document_id: str
-    user_query: str = ""  # Raw user question for embedding/retrieval (separate from the full prompt)
+    user_query: str = ""  
+    mode: str = "chat"
+    language: str = "English"
+    length: str = "medium"
 
 def get_session_history(session_id: str):
     """Retrieves or creates the chat history for a specific session ID stored in MongoDB."""
@@ -225,17 +170,27 @@ def get_session_history(session_id: str):
 
 @app.post("/api/chat")
 async def chat_with_docs(request: ChatRequest):
-    if not request.query:
+    actual_query = request.user_query if request.user_query else request.query
+    if not actual_query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
              
     try:
         from app.services.router_service import RouterService
+        from app.core.prompts import build_prompt
         router = RouterService()
+
+        # Securely build prompt on backend based on the mode requested
+        full_safe_query = build_prompt(
+            user_query=actual_query, 
+            mode=request.mode, 
+            language=request.language, 
+            length=request.length
+        )
 
         # The router handles the decision between RAG and PageIndex, including fallback logic
         result = await router.route_query(
-            user_query=request.user_query,
-            full_query=request.query,
+            user_query=actual_query,
+            full_query=full_safe_query, # Send the safe backend prompt to LangChain
             session_id=request.session_id,
             document_id=request.document_id
         )
@@ -256,20 +211,19 @@ async def chat_with_docs(request: ChatRequest):
             "session_id": request.session_id,
             "document_id": request.document_id
         }
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
         import traceback
-        print("\n--- ERROR IN /api/chat ---")
+        error_msg = str(e).lower()
+        print(f"\n--- ERROR IN /api/chat: {str(e)} ---")
+        
+        if "429" in error_msg or "quota" in error_msg or "rate limit" in error_msg:
+            return {"response": "AI Provider Rate Limit reached (Free Tier). This usually means the current model is under high traffic. Please wait 60 seconds or try a different model in your .env file.", "pages": [], "source": "error_rate_limit"}
+            
         traceback.print_exc()
-        print(f"Exception details: {str(e)}")
-        print("----------------------------\n")
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        import traceback
-        print("\n--- ERROR IN /api/chat ---")
-        traceback.print_exc()
-        print(f"Exception details: {str(e)}")
-        print("----------------------------\n")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"response": "Sorry, I encountered an error while answering that question. Please try again in 30 seconds.", "pages": [], "source": "error"}
+
 
 @app.get("/api/history/{session_id}")
 async def get_chat_history(session_id: str):

@@ -1,5 +1,7 @@
 import os
 from typing import List, Tuple
+from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
@@ -8,7 +10,11 @@ from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
 from langchain_core.documents import Document
 from collections import defaultdict
 
-from ..core.config import MONGO_URI, DB_NAME, GEMINI_MODEL
+import logging
+from ..core.config import (MONGO_URI, DB_NAME, GEMINI_MODEL, OPENROUTER_API_KEY, 
+                           OPENROUTER_MODEL, SITE_URL, SITE_NAME, GROQ_API_KEY, GROQ_MODEL)
+
+logger = logging.getLogger(__name__)
 from database import get_vector_store
 
 def get_session_history(session_id: str):
@@ -21,8 +27,48 @@ def get_session_history(session_id: str):
 
 class RAGService:
     def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL, temperature=0.2)
+        # Use Groq if API key is provided, else fallback to OpenRouter, else Gemini
+        if GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
+            logger.info(f"Initializing RAGService with Groq model: {GROQ_MODEL}")
+            self.llm = ChatGroq(
+                model=GROQ_MODEL,
+                groq_api_key=GROQ_API_KEY,
+                temperature=0.1,
+            )
+        elif OPENROUTER_API_KEY and OPENROUTER_API_KEY != "YOUR_OPENROUTER_API_KEY":
+            logger.info(f"Initializing RAGService with OpenRouter model: {OPENROUTER_MODEL}")
+            self.llm = ChatOpenAI(
+                model=OPENROUTER_MODEL,
+                openai_api_key=OPENROUTER_API_KEY,
+                openai_api_base="https://openrouter.ai/api/v1",
+                default_headers={
+                    "HTTP-Referer": SITE_URL,
+                    "X-Title": SITE_NAME,
+                },
+                temperature=0.1,
+            )
+        else:
+            logger.info(f"Initializing RAGService with Gemini model: {GEMINI_MODEL}")
+            self.llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL, 
+                temperature=0.1,
+                max_retries=6, 
+            )
         self.vectorstore = get_vector_store()
+
+    def get_system_prompt(self):
+        """Standard System Prompt for PDF Bot"""
+        return (
+            "You are PDF Nectar, an intelligent document analysis assistant. "
+            "Your goal is to provide **structured, highly detailed, and data-driven answers**. \n\n"
+            "STRICT GUIDELINES:\n"
+            "1. **Extract Numeric Data**: Always prioritize specific values (emissions, percentages, currency, dates) over generic text.\n"
+            "2. **Structured Formatting**: Use Markdown (Level 2/3 headers, bold text, and bullet points) to make information readable.\n"
+            "3. **Tone**: Be professional but direct. Use clear icons (e.g., 🌍, 📊, 🧾) for major sections if appropriate.\n"
+            "4. **No Hallucinations**: Only use the provided context. If a value is missing, say so.\n"
+            "5. **Source Citation**: Mention page numbers if available in brackets (e.g., [Page 12]).\n\n"
+            "Context Information:\n{context}"
+        )
 
     def get_retriever(self, document_id: str, k: int = 5):
         return self.vectorstore.as_retriever(
@@ -64,7 +110,17 @@ class RAGService:
         retriever = self.get_retriever(document_id)
         search_query = user_query.strip() if user_query.strip() else full_query
         
-        retrieved_docs = retriever.invoke(search_query)
+        # Atlas Vector Search is eventually consistent. 
+        # If we just uploaded a document, we might need a moment for the index to catch up.
+        retrieved_docs = []
+        import asyncio
+        for attempt in range(5): # Try up to 5 times (20 seconds)
+            retrieved_docs = retriever.invoke(search_query)
+            if retrieved_docs:
+                break
+            if attempt < 4:
+                logger.info(f"Retrying retrieval for {document_id} (Attempt {attempt+1}/5) - Waiting for Atlas index...")
+                await asyncio.sleep(5) # Wait 5 seconds for Atlas to index
         
         if not retrieved_docs:
             return {
@@ -75,19 +131,8 @@ class RAGService:
 
         doc_data = self.group_and_format_docs(retrieved_docs)
         
-        system_prompt = (
-            "You are PDF Nectar, an expert AI assistant tasked with answering questions strictly based on the provided document excerpts. "
-            "Follow these rules strictly:\n"
-            "1. ONLY use the information provided in the Context below. Do not use outside knowledge or hallucinate information.\n"
-            "2. If the answer cannot be found in the Context, politely state: 'I cannot find the answer to this question in the provided document.'\n"
-            "3. Do NOT insert any page citations, source references, or page numbers inside your answer text.\n"
-            "4. Do NOT write (Source: Page X), [Source: Page X], or any similar inline citation.\n"
-            "5. Do NOT add a Sources or References section at the end.\n\n"
-            "Context Information:\n{context}"
-        )
-        
         prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", self.get_system_prompt()),
             MessagesPlaceholder(variable_name="history"),
             ("human", "{question}"),
         ])

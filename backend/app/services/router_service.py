@@ -43,11 +43,18 @@ class RouterService:
         
         if use_pageindex:
             try:
+                logger.info("PageIndex triggered")
                 result = await self.pageindex_service.query(user_query, full_query, session_id, document_id)
                 return result
             except Exception as e:
-                logger.error(f"PageIndex failure: {str(e)}. Falling back to Vector RAG.")
+                logger.error(f"PageIndex failed: {str(e)}")
+                logger.info("Fallback to RAG triggered")
                 # Fallback continues to the RAG call below
 
         # Default fallback to Vector RAG
-        return await self.rag_service.query(user_query, full_query, session_id, document_id)
+        try:
+            logger.info("Standard Vector RAG triggered")
+            return await self.rag_service.query(user_query, full_query, session_id, document_id)
+        except Exception as e:
+            logger.error(f"LLM generation failed: {str(e)}")
+            raise e

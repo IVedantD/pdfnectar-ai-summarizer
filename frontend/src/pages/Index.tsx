@@ -50,12 +50,19 @@ const Index = () => {
       const formData = new FormData();
       formData.append("file", file);
       
-      const uploadRes = await fetch("http://127.0.0.1:8000/api/upload", {
+      const uploadRes = await fetch(`/api/upload`, {
         method: "POST",
         body: formData,
       });
       
-      if (!uploadRes.ok) throw new Error("Document processing failed");
+      if (!uploadRes.ok) {
+        let errorMessage = "Document processing failed";
+        try {
+            const errorData = await uploadRes.json();
+            if (errorData.detail) errorMessage = errorData.detail;
+        } catch(e) {}
+        throw new Error(errorMessage);
+      }
       
       const uploadData = await uploadRes.json();
       const newDocId = uploadData.document_id;
@@ -83,59 +90,31 @@ Use clear Markdown formatting and follow the structure below.
 --------------------------------------------------
 
 1️⃣ 📋 DOCUMENT OVERVIEW
-Provide a short explanation (4–6 sentences) describing the overall purpose of the document.
+Provide a short explanation describing the overall purpose of the document.
 
 --------------------------------------------------
 
 2️⃣ 🔑 KEY INSIGHTS
-Extract the 3–5 most important ideas from the document.
+Extract the most important ideas from the document.
 
-• Use bullet points  
+• Use bullet points
 • Highlight key technologies, systems, or entities in **bold**
 
---------------------------------------------------
+${length === "short" ? "" : `--------------------------------------------------
 
 3️⃣ 🧩 IMPORTANT ENTITIES
-Identify key elements mentioned in the document such as:
-
-• **Technologies**
-• **Modules / Components**
-• **Database Tables**
-• **Processes / Workflows**
-• **Actors / Roles**
-
-List them clearly using bullet points.
+Identify key elements mentioned in the document such as Technologies, Modules, Tables, Workflows, or Roles. List them clearly using bullet points.
 
 --------------------------------------------------
 
 4️⃣ 📐 DIAGRAM / PROCESS EXPLANATION
-If the document contains diagrams, workflows, or system architecture descriptions (Use Case, Class, Sequence, Activity, Architecture diagrams), explain them briefly.
-
-If none exist, skip this section.
+If the document contains diagrams, workflows, or system architecture descriptions, explain them briefly. If none exist, skip this section.
 
 --------------------------------------------------
 
 5️⃣ 📊 DATA INSIGHTS (ONLY IF NUMERIC DATA EXISTS)
-
-If the document contains numbers, percentages, statistics, or measurable values:
-
-• Extract the relevant values  
-• Present them in a structured table  
-
-Example format:
-
-| Category | Value |
-|----------|-------|
-| Example A | 45 |
-| Example B | 30 |
-
-• Suggest a suitable visualization:
-  - Pie Chart
-  - Bar Chart
-  - Trend Chart
-
-If no meaningful numeric data exists, skip this section.
-
+If the document contains numbers, percentages, or statistics, extract the relevant values and present them in a structured table. If no meaningful numeric data exists, skip this section.
+`}
 --------------------------------------------------
 
 6️⃣ 💡 KEY TAKEAWAYS
@@ -190,7 +169,7 @@ FINAL RULES
 • Prefer bullet points and short paragraphs.
 • Highlight key technologies or entities in **bold**.`;
 
-      const chatRes = await fetch("http://127.0.0.1:8000/api/chat", {
+      const chatRes = await fetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
@@ -201,7 +180,14 @@ FINAL RULES
         })
       });
       
-      if (!chatRes.ok) throw new Error("Summarization failed");
+      if (!chatRes.ok) {
+        let errorMessage = "Summarization failed";
+        try {
+            const errorData = await chatRes.json();
+            if (errorData.detail) errorMessage = errorData.detail;
+        } catch(e) {}
+        throw new Error(errorMessage);
+      }
       
       const chatData = await chatRes.json();
       setSummaryText(chatData.response);
@@ -498,7 +484,7 @@ FINAL RULES
 User Question:
 ${questionText}`;
 
-      const chatRes = await fetch("http://127.0.0.1:8000/api/chat", {
+      const chatRes = await fetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -509,7 +495,14 @@ ${questionText}`;
         }),
       });
 
-      if (!chatRes.ok) throw new Error("Failed to get answer");
+      if (!chatRes.ok) {
+        let errorMessage = "Failed to get answer";
+        try {
+            const errorData = await chatRes.json();
+            if (errorData.detail) errorMessage = errorData.detail;
+        } catch(e) {}
+        throw new Error(errorMessage);
+      }
 
       const chatData = await chatRes.json();
       
@@ -640,7 +633,7 @@ ${questionText}`;
                 <SummaryResults 
                   summaryText={summaryText} 
                   onDownloadPDF={filename ? () => {
-                    window.open(`http://127.0.0.1:8000/api/download/${filename}`, "_blank");
+                    window.open(`/api/download/${filename}`, "_blank");
                   } : undefined}
                 />
               </div>
