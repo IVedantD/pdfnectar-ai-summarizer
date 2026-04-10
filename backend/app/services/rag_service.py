@@ -106,8 +106,12 @@ class RAGService:
             "source_pages": sorted(list(final_pages))
         }
 
-    async def query(self, user_query: str, full_query: str, session_id: str, document_id: str) -> dict:
-        retriever = self.get_retriever(document_id)
+    async def query(self, user_query: str, full_query: str, session_id: str, document_id: str, mode: str = "chat") -> dict:
+        is_summary = mode == "summary"
+        
+        # Use higher k for summaries to capture more diverse content
+        primary_k = 10 if is_summary else 5
+        retriever = self.get_retriever(document_id, k=primary_k)
         search_query = user_query.strip() if user_query.strip() else full_query
         
         # Atlas Vector Search is eventually consistent. 
@@ -128,6 +132,25 @@ class RAGService:
                 "pages": [],
                 "source": "vector_rag"
             }
+
+        # Secondary retrieval pass: specifically fetch numeric/tabular content
+        # This ensures tables, figures, and statistics are included in the context
+        numeric_query = "numeric data tables figures statistics values emissions percentages financial metrics"
+        numeric_k = 8 if is_summary else 5
+        numeric_retriever = self.get_retriever(document_id, k=numeric_k)
+        try:
+            numeric_docs = numeric_retriever.invoke(numeric_query)
+            
+            # Deduplicate by page_content to avoid sending the same chunk twice
+            existing_contents = set(d.page_content.strip() for d in retrieved_docs)
+            for doc in numeric_docs:
+                if doc.page_content.strip() not in existing_contents:
+                    retrieved_docs.append(doc)
+                    existing_contents.add(doc.page_content.strip())
+            
+            logger.info(f"[RAG] Primary: {primary_k} requested, Numeric: {len(numeric_docs)} found, Total unique: {len(retrieved_docs)}")
+        except Exception as e:
+            logger.warning(f"Secondary numeric retrieval failed (non-fatal): {e}")
 
         doc_data = self.group_and_format_docs(retrieved_docs)
         
@@ -154,5 +177,7 @@ class RAGService:
         return {
             "response": response,
             "pages": doc_data["source_pages"],
-            "source": "vector_rag"
+            "source": "vector_rag",
+            "context_str": doc_data["context_str"]
         }
+

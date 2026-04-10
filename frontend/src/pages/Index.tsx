@@ -1,4 +1,5 @@
 import beeLogo from "@/assets/bee-logo.png";
+import { ChartRenderer } from "@/components/ChartRenderer";
 import DropZone from "@/components/DropZone";
 import LoadingSteps from "@/components/LoadingSteps";
 import SummaryResults from "@/components/SummaryResults";
@@ -135,26 +136,6 @@ Mention the page numbers used.
 
 Example:
 Source: Page 1, Page 3
-
---------------------------------------------------
-
-📊 OPTIONAL CHART DATA OUTPUT
-
-If numeric data suitable for visualization exists, return raw JSON called chart_data at the end of the response.
-
-Return RAW JSON only.
-Do NOT wrap JSON inside markdown code blocks.
-
-Example:
-
-chart_data:
-{
- "labels": ["Category A","Category B"],
- "values": [45,30],
- "chart_type": "bar"
-}
-
-If no numeric data exists, DO NOT include chart_data.
 
 --------------------------------------------------
 
@@ -660,7 +641,18 @@ ${questionText}`;
                         >
                           {msg.role === "ai" ? (
                             <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-p:my-2 prose-ul:my-2 prose-li:my-0.5">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                  code({ node, className, children, ...props }: any) {
+                                    const match = /language-(\w+)/.exec(className || "");
+                                    if (match && match[1] === "recharts") {
+                                      return <ChartRenderer dataStr={String(children).replace(/\n$/, '')} />;
+                                    }
+                                    return <code className={className} {...props}>{children}</code>;
+                                  }
+                                }}
+                              >
                                 {msg.content}
                               </ReactMarkdown>
                             </div>

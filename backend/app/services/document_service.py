@@ -34,8 +34,9 @@ class DocumentService:
         # 2. Split the PDF into chunks
         logger.info("Splitting text")
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=1500,
+            chunk_overlap=300,
+            separators=["\n\n", "\n", "|", " ", ""],
             add_start_index=True
         )
         chunks = text_splitter.split_documents(documents)

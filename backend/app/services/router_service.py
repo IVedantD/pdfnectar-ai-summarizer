@@ -38,7 +38,7 @@ class RouterService:
         logger.info(f"Routing to Vector RAG: No complex keywords found in {page_count}-page document")
         return False
 
-    async def route_query(self, user_query: str, full_query: str, session_id: str, document_id: str) -> dict:
+    async def route_query(self, user_query: str, full_query: str, session_id: str, document_id: str, mode: str = "chat") -> dict:
         use_pageindex = self.should_use_pageindex(full_query, document_id)
         
         if use_pageindex:
@@ -54,7 +54,7 @@ class RouterService:
         # Default fallback to Vector RAG
         try:
             logger.info("Standard Vector RAG triggered")
-            return await self.rag_service.query(user_query, full_query, session_id, document_id)
+            return await self.rag_service.query(user_query, full_query, session_id, document_id, mode=mode)
         except Exception as e:
             logger.error(f"LLM generation failed: {str(e)}")
             raise e

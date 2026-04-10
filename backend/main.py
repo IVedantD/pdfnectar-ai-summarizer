@@ -11,6 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Import from our database module
 from database import get_vector_store
+from app.services.chart_validator import ChartValidator
 
 # Load environment variables from .env file
 load_dotenv(override=True)
@@ -193,7 +194,8 @@ async def chat_with_docs(request: ChatRequest):
             user_query=actual_query,
             full_query=full_safe_query, # Send the safe backend prompt to LangChain
             session_id=request.session_id,
-            document_id=request.document_id
+            document_id=request.document_id,
+            mode=request.mode
         )
 
         # Construct the public PDF URL (using any retrieved doc metadata if needed, 
@@ -203,9 +205,19 @@ async def chat_with_docs(request: ChatRequest):
         filename = metadata.get("original_filename", "document.pdf") if metadata else "document.pdf"
         safe_filename = f"{request.document_id}_{filename}"
         pdf_url = f"/api/download/{safe_filename}"
+        
+        # VALIDATION LAYER
+        # Validate any charts in the response to ensure they are fully grounded in the document context
+        context_str = result.get("context_str", "")
+        validated_response = ChartValidator.validate(result["response"], context_str)
+        
+        # UI Polish: if the AI was scared to make a chart and apologized at the end, clean it up
+        scared_apology = "The document does not provide enough information to generate a chart."
+        if validated_response.strip().endswith(scared_apology):
+            validated_response = validated_response.replace(scared_apology, "").strip()
 
         return {
-            "response": result["response"],
+            "response": validated_response,
             "pages": result["pages"],
             "source": result.get("source", "hybrid"),
             "pdf_url": pdf_url,

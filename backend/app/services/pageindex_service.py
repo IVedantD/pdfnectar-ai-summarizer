@@ -151,5 +151,6 @@ class PageIndexService:
         return {
             "response": final_answer,
             "pages": doc_data["source_pages"],
-            "source": "pageindex_reasoning"
+            "source": "pageindex_reasoning",
+            "context_str": doc_data["context_str"]
         }

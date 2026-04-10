@@ -4,6 +4,7 @@ import { Copy, Download, FileText } from "lucide-react";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { toast } from "sonner";
+import { ChartRenderer } from "./ChartRenderer";
 
 interface SummaryResultsProps {
   summaryText: string;
@@ -34,9 +35,20 @@ const SummaryResults = ({ summaryText, onDownloadPDF }: SummaryResultsProps) => 
       className="flex flex-col gap-4"
     >
       {/* Generated Summary wrapped in Markdown */}
-      <motion.div variants={item} className="result-card p-6 border rounded-xl bg-card text-card-foreground shadow-sm">
-        <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-display prose-headings:font-semibold prose-a:text-primary prose-table:border-collapse prose-th:bg-secondary prose-th:p-2 prose-td:p-2 prose-td:border-b">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      <motion.div variants={item} className="result-card p-6 border rounded-xl bg-card text-card-foreground shadow-sm min-h-[200px]">
+        <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-display prose-headings:font-semibold prose-h3:text-primary prose-h3:mt-6 prose-h3:mb-3 prose-a:text-primary prose-table:border-collapse prose-th:bg-secondary prose-th:p-2 prose-td:p-2 prose-td:border-b">
+          <ReactMarkdown 
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code({ node, className, children, ...props }: any) {
+                const match = /language-(\w+)/.exec(className || "");
+                if (match && match[1] === "recharts") {
+                   return <ChartRenderer dataStr={String(children).replace(/\n$/, '')} />;
+                }
+                return <code className={className} {...props}>{children}</code>;
+              }
+            }}
+          >
             {summaryText || "No summary was generated."}
           </ReactMarkdown>
         </div>
