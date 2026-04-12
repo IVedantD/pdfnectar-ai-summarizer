@@ -23,14 +23,19 @@ class ChartValidator:
             return ""
 
     @staticmethod
-    def validate(ai_response: str, context_str: str) -> str:
+    def validate(ai_response: str, context_str: str, context_has_data: bool = True) -> str:
         """
         Validates any ```recharts JSON blocks in the AI response.
-        Applies safe data parsing, edge case limits, sorting, and markdown table fallback.
+        Applies data availability gating, safe parsing, meaningful name checks, and markdown table fallback.
         """
+        # 1. Final Safety Gate: If no numeric data in context, strip any hallucinated blocks
+        recharts_pattern = r"```recharts\n(.*?)\n```"
+        if not context_has_data:
+            print(f"[ChartValidator] No data in context. Stripping block.")
+            return re.sub(recharts_pattern, "", ai_response, flags=re.DOTALL).strip()
+
         # Find the recharts block
-        pattern = r"```recharts\n(.*?)\n```"
-        match = re.search(pattern, ai_response, re.DOTALL)
+        match = re.search(recharts_pattern, ai_response, re.DOTALL)
         
         if not match:
             return ai_response
@@ -52,12 +57,30 @@ class ChartValidator:
                 raise ValueError("Data array missing or invalid format")
                 
             valid_data = []
+            
+            # Meaningful Data Validation: Patterns to REJECT as data point names
+            REJECT_NAME_PATTERNS = [
+                re.compile(r"^\d{10,}$"),                      # Long numeric IDs
+                re.compile(r"^\d{4}-\d{2}-\d{2}.*$"),          # Dates/Timestamps as names
+                re.compile(r"^[a-f0-9-]{36}$"),                 # UUIDs
+                re.compile(r"^\d{3}[-.\s]\d{3}[-.\s]\d{4}$"),    # Phone numbers
+            ]
+
             for item in config["data"]:
-                if "name" not in item or "value" not in item:
+                name = str(item.get("name", ""))
+                value = item.get("value")
+
+                if not name or value is None:
                     continue
+                
+                # Reject if name looks like noise/IDs
+                if any(p.match(name) for p in REJECT_NAME_PATTERNS):
+                    print(f"[ChartValidator] Rejecting non-meaningful name: {name}")
+                    continue
+
                 try:
                     # Parse to float safely
-                    val = float(item["value"])
+                    val = float(value)
                     if val != val: # Check for NaN
                         raise ValueError("NaN value")
                     item["value"] = val
@@ -73,24 +96,26 @@ class ChartValidator:
             if num_points < 2:
                 raise ValueError(f"Too few valid data points ({num_points}). Min 2 required.")
                 
-            all_zero = all(item["value"] == 0 for item in valid_data)
-            if all_zero:
-                raise ValueError("All data values are 0")
+            all_zero_or_neg = all(item["value"] <= 0 for item in valid_data)
+            if all_zero_or_neg:
+                raise ValueError("All data values are non-positive")
                 
             if num_points > 15:
                 raise ValueError(f"Too many data points ({num_points} > 15 limit). Preferring table.")
                 
-            # Smart Type checking
+            # Smart Type checking (Pie)
             if config.get("type") == "pie":
                 title_lower = config.get("title", "").lower()
                 is_prop_title = any(word in title_lower for word in ["%", "percent", "share", "proportion", "breakdown"])
                 total = sum([item["value"] for item in valid_data])
-                if not is_prop_title and not (95 <= total <= 105) and not (0.95 <= total <= 1.05):
+                # Pie charts should sum to ~100 or ~1.0
+                is_sum_100 = (95 <= total <= 105) or (0.95 <= total <= 1.05)
+                if not is_prop_title and not is_sum_100:
                     config["type"] = "bar"
                     
-            # Data Sorting
-            # Sort data descending by value
-            config["data"] = sorted(config["data"], key=lambda x: x["value"], reverse=True)
+            # Data Sorting (Bar/Pie)
+            if config.get("type") in ["bar", "pie"]:
+                config["data"] = sorted(config["data"], key=lambda x: x["value"], reverse=True)
             
             # Return cleaned JSON block
             clean_markdown = f"```recharts\n{json.dumps(config, indent=2)}\n```"

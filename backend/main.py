@@ -179,43 +179,72 @@ async def chat_with_docs(request: ChatRequest):
     try:
         from app.services.router_service import RouterService
         from app.core.prompts import build_prompt
+        from app.core.document_manager import DocumentManager
+        from app.services.numeric_detector import user_requests_visualization
+        
         router = RouterService()
+        
+        # 1. Fetch cached document metadata
+        metadata = DocumentManager.get_metadata(request.document_id)
+        has_numeric_data = metadata.get("has_numeric_data", True) if metadata else True
+        suggested_chart_type = metadata.get("suggested_chart_type", "bar") if metadata else "bar"
+        
+        # 2. Detect user visualization intent
+        is_chart_requested = user_requests_visualization(actual_query)
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[CHAT] Flags for {request.document_id}: has_numeric_data={has_numeric_data}, is_chart_requested={is_chart_requested}, mode={request.mode}")
 
-        # Securely build prompt on backend based on the mode requested
+        # 3. Securely build prompt on backend based on flags
         full_safe_query = build_prompt(
             user_query=actual_query, 
-            mode=request.mode, 
+            mode_str=request.mode, 
             language=request.language, 
-            length=request.length
+            length=request.length,
+            has_data=has_numeric_data,
+            suggested_chart_type=suggested_chart_type,
+            is_chart_requested=is_chart_requested
         )
 
-        # The router handles the decision between RAG and PageIndex, including fallback logic
+        # 4. The router handles the decision between RAG and PageIndex
         result = await router.route_query(
             user_query=actual_query,
-            full_query=full_safe_query, # Send the safe backend prompt to LangChain
+            full_query=full_safe_query,
             session_id=request.session_id,
             document_id=request.document_id,
             mode=request.mode
         )
 
-        # Construct the public PDF URL (using any retrieved doc metadata if needed, 
-        # but for now we can reconstruct from document_id if we have it or use a default)
-        from app.core.document_manager import DocumentManager
-        metadata = DocumentManager.get_metadata(request.document_id)
+        # 5. Construct the public PDF URL
         filename = metadata.get("original_filename", "document.pdf") if metadata else "document.pdf"
         safe_filename = f"{request.document_id}_{filename}"
         pdf_url = f"/api/download/{safe_filename}"
         
-        # VALIDATION LAYER
-        # Validate any charts in the response to ensure they are fully grounded in the document context
+        # 6. VALIDATION LAYER
+        raw_response = result["response"]
         context_str = result.get("context_str", "")
-        validated_response = ChartValidator.validate(result["response"], context_str)
         
-        # UI Polish: if the AI was scared to make a chart and apologized at the end, clean it up
-        scared_apology = "The document does not provide enough information to generate a chart."
-        if validated_response.strip().endswith(scared_apology):
-            validated_response = validated_response.replace(scared_apology, "").strip()
-
+        # Validate charts based on context data availability
+        validated_response = ChartValidator.validate(raw_response, context_str, context_has_data=has_numeric_data)
+        
+        # 7. Post-processing safety: Handling no-data cases
+        if not has_numeric_data:
+            import re
+            recharts_block_pattern = r"```recharts\n.*?\n```"
+            has_recharts = bool(re.search(recharts_block_pattern, validated_response, re.DOTALL))
+            
+            if has_recharts:
+                if is_chart_requested:
+                    # User asked for a chart but no data exists -> show explicit message
+                    no_data_msg = "No structured numeric data found in the document to generate a chart or visualization."
+                    validated_response = re.sub(recharts_block_pattern, no_data_msg, validated_response, flags=re.DOTALL)
+                    logger.info("[CHAT] Replaced hallucinated recharts block with 'no data' message")
+                else:
+                    # Summary mode or general chat -> strip silently
+                    validated_response = re.sub(recharts_block_pattern, "", validated_response, flags=re.DOTALL).strip()
+                    logger.info("[CHAT] Silently stripped hallucinated recharts block (no data in context)")
+        
         return {
             "response": validated_response,
             "pages": result["pages"],

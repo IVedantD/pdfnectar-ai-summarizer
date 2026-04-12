@@ -64,10 +64,37 @@ class DocumentService:
 
         # 5. Save metadata using DocumentManager
         logger.info("Saving document metadata")
+        
+        # Performance: Hybrid sampling for numeric detection (Beginning + Middle + End)
+        sample_chunks = []
+        if len(chunks) <= 10:
+            sample_chunks = chunks
+        else:
+            # First 3
+            sample_chunks.extend(chunks[:3])
+            # Random 3 from middle 50%
+            import random
+            mid_start = int(len(chunks) * 0.25)
+            mid_end = int(len(chunks) * 0.75)
+            if mid_end > mid_start + 3:
+                sample_chunks.extend(random.sample(chunks[mid_start:mid_end], 3))
+            # Last 2
+            sample_chunks.extend(chunks[-2:])
+            
+        sample_text = "\n\n".join([c.page_content for c in sample_chunks])
+        
+        from app.services.numeric_detector import has_numeric_data, detect_chart_type
+        has_data, score = has_numeric_data(sample_text)
+        suggested_type = detect_chart_type(sample_text)
+        
+        logger.info(f"[Ingestion] Document {document_id} detection: has_data={has_data} (score={score}), suggested_type={suggested_type}")
+
         DocumentManager.save_metadata(document_id, {
             "original_filename": original_filename,
             "total_pages": len(documents),
-            "total_chunks": len(chunks)
+            "total_chunks": len(chunks),
+            "has_numeric_data": has_data,
+            "suggested_chart_type": suggested_type
         })
 
         # 6. Generate Suggested Questions based on the initial chunks
