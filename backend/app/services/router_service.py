@@ -4,9 +4,8 @@ from .rag_service import RAGService
 from ..core.config import PAGEINDEX_THRESHOLD, COMPLEX_KEYWORDS
 from ..core.document_manager import DocumentManager
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Inherit logging from main setup
+logger = logging.getLogger("pdfnectar.router")
 
 class RouterService:
     def __init__(self):
@@ -38,23 +37,22 @@ class RouterService:
         logger.info(f"Routing to Vector RAG: No complex keywords found in {page_count}-page document")
         return False
 
-    async def route_query(self, user_query: str, full_query: str, session_id: str, document_id: str, mode: str = "chat") -> dict:
+    async def route_query(self, user_query: str, full_query: str, session_id: str, document_id: str, mode: str = "chat", **kwargs) -> dict:
         use_pageindex = self.should_use_pageindex(full_query, document_id)
         
         if use_pageindex:
             try:
                 logger.info("PageIndex triggered")
-                result = await self.pageindex_service.query(user_query, full_query, session_id, document_id)
+                result = await self.pageindex_service.query(user_query, full_query, session_id, document_id, **kwargs)
                 return result
             except Exception as e:
                 logger.error(f"PageIndex failed: {str(e)}")
                 logger.info("Fallback to RAG triggered")
-                # Fallback continues to the RAG call below
 
         # Default fallback to Vector RAG
         try:
             logger.info("Standard Vector RAG triggered")
-            return await self.rag_service.query(user_query, full_query, session_id, document_id, mode=mode)
+            return await self.rag_service.query(user_query, session_id, document_id, mode=mode, **kwargs)
         except Exception as e:
             logger.error(f"LLM generation failed: {str(e)}")
             raise e

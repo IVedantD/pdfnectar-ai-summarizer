@@ -1,278 +1,305 @@
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import shutil
 import tempfile
 import uuid
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+import logging
+import asyncio
+import time
+from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Security, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
-# Import from our database module
-from database import get_vector_store
+from app.core.logger import setup_logging, CorrelationIdMiddleware, RequestSizeMiddleware
+from app.core.auth import get_current_user
+from app.core.supabase import supabase
+from app.core.document_manager import DocumentManager
+from app.services.document_service import DocumentService
+from app.services.router_service import RouterService
 from app.services.chart_validator import ChartValidator
+from app.services.numeric_detector import user_requests_visualization
+from database import MONGO_URI, DB_NAME, METADATA_COLLECTION
 
-# Load environment variables from .env file
-load_dotenv(override=True)
+# 1. Initialize Logging
+setup_logging()
+logger = logging.getLogger("pdfnectar.main")
+server_start_time = time.time()
 
-app = FastAPI(title="PDFNectar AI Summarizer API", version="1.0.0")
+# 2. Rate Limiting Setup
+def get_user_or_ip(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user.id
+    return get_remote_address(request)
 
-# Configure CORS for frontend integration
-origins = [
-    "http://localhost:5173", # Default Vite port
-    "http://localhost:8080", # Alternative Vite port
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:8080",
-]
+limiter = Limiter(key_func=get_user_or_ip)
+app = FastAPI(title="PDFNectar AI Summarizer API", version="2.4.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# 3. Custom Auth Middleware (for Rate Limiting & Pre-auth)
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Exclude public paths from pre-auth
+        if request.url.path in ["/api/health", "/", "/docs", "/openapi.json"]:
+            return await call_next(request)
+            
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            try:
+                # We do a fast check without the full FastAPI dependency overhead
+                user_response = supabase.auth.get_user(token)
+                if user_response and user_response.user:
+                    request.state.user = user_response.user
+            except:
+                pass # Will be caught by Depends(get_current_user) in routes
+        return await call_next(request)
+
+app.add_middleware(AuthMiddleware)
+app.add_middleware(CorrelationIdMiddleware)
+app.add_middleware(RequestSizeMiddleware)
+
+# 4. Middleware & Security
+_trusted_hosts_env = os.getenv("TRUSTED_HOSTS", "")
+if _trusted_hosts_env and "*" not in _trusted_hosts_env:
+    ALLOWED_HOSTS = _trusted_hosts_env.split(",")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
+# Restrictive CORS for production
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8080,http://localhost:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
 )
+
+# Constants
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "100"))
+
+# 5. Standardized Global Exception Handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    req_id = getattr(request.state, "request_id", "N/A")
+    logger.error(f"Unhandled exception [req_id={req_id}]: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred.", "code": "INTERNAL_SERVER_ERROR", "request_id": req_id}
+    )
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to PDFNectar AI Summarizer API"}
+    return {"message": "PDFNectar AI Summarizer API v2.4.0 (Production Core)"}
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+@app.get("/api/health")
+async def health_check():
+    """Hardened health check for all dependencies."""
+    async def check_mongo():
+        try:
+            await asyncio.to_thread(METADATA_COLLECTION.find_one, {})
+            return "up"
+        except: return "down"
 
-def cleanup_old_uploads(upload_dir: str, max_files: int = 50):
-    """Deletes old files if the directory exceeds the max_files limit."""
-    if not os.path.exists(upload_dir):
-        return
-    files = [os.path.join(upload_dir, f) for f in os.listdir(upload_dir) if f.endswith('.pdf')]
-    if len(files) > max_files:
-        files.sort(key=lambda x: os.path.getctime(x))
-        for f in files[:len(files) - max_files]:
-            try:
-                os.remove(f)
-            except Exception:
-                pass
+    async def check_supabase():
+        try:
+            await asyncio.to_thread(supabase.storage.list_buckets)
+            return "up"
+        except: return "down"
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+    results = await asyncio.gather(check_mongo(), check_supabase(), return_exceptions=True)
+    
+    status = {
+        "status": "online",
+        "uptime": f"{int(time.time() - server_start_time)}s",
+        "dependencies": {
+            "mongodb": results[0] if not isinstance(results[0], Exception) else "down",
+            "supabase": results[1] if not isinstance(results[1], Exception) else "down"
+        }
+    }
+    
+    if "down" in status["dependencies"].values():
+        status["status"] = "degraded"
+        status["failed_services"] = [k for k, v in status["dependencies"].items() if v == "down"]
+        return JSONResponse(status_code=503, content=status)
+        
+    return status
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Invalid file type. Only standard PDFs are allowed.")
-        
-    if file.size and file.size > MAX_FILE_SIZE:
-         raise HTTPException(status_code=413, detail="File is too large. Max size is 50MB.")
-
-    vectorstore = get_vector_store()
+@limiter.limit("10/minute")
+async def upload_pdf(
+    request: Request, 
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    req_id = request.state.request_id
+    extra = {"req_id": req_id, "user_id": user.id}
     
-    # Generate a unique document ID
+    # 1. Defensive Validation
+    if not file.filename.lower().endswith(".pdf") or file.content_type != "application/pdf":
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid file type. Only standard PDFs are allowed.",
+            headers={"code": "INVALID_FILE_TYPE"}
+        )
+    
+    # 2. Memory-Safe Buffered Read
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413, 
+            detail="File too large. Max 5MB allowed.",
+            headers={"code": "FILE_TOO_LARGE"}
+        )
+    
     document_id = str(uuid.uuid4())
-    
-    # Save the uploaded file to a temporary location for processing and permanent location for downloading
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Prefix filename with document_id to avoid accidental overwrites of identical filenames
-    safe_filename = f"{document_id}_{file.filename}"
-    permanent_path = os.path.join(upload_dir, safe_filename)
-    
-    # Trigger cleanup dynamically before saving the new file
-    cleanup_old_uploads(upload_dir)
-    
-    try:
-        import aiofiles
-        async with aiofiles.open(permanent_path, "wb") as buffer:
-            await buffer.write(await file.read())
-            
-        # Delegate heavy lifting to explicitly tailored service layer
-        from app.services.document_service import DocumentService
-        result = DocumentService.process_and_ingest_pdf(permanent_path, document_id, file.filename)
+    logger.info(f"Upload initiated: {file.filename}", extra={**extra, "doc_id": document_id})
 
-        print(f"\n[UPLOAD] Successfully processed document: {file.filename}")
-        print(f"[UPLOAD] Generated document_id: {document_id}")
+    # 3. Path Sanitization & Persistence
+    safe_filename = "".join([c for c in file.filename if c.isalnum() or c in "._-"])
+    storage_path = f"{document_id}_{safe_filename}"
+    
+    # 4. Atomic Initialization (Primary Record)
+    await asyncio.to_thread(DocumentManager.initialize_status, document_id, file.filename, user.id)
+
+    try:
+        # 5. Supabase Persistence
+        await asyncio.to_thread(
+            supabase.storage.from_("pdfs").upload,
+            path=storage_path,
+            file=content,
+            file_options={"content-type": "application/pdf"}
+        )
         
+        # 6. Trigger Asynchronous Processing
+        temp_dir = os.path.join(tempfile.gettempdir(), "pdfnectar")
+        
+        def save_temp_file():
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_file_path = os.path.join(temp_dir, storage_path)
+            with open(temp_file_path, "wb") as f:
+                f.write(content)
+            return temp_file_path
+
+        temp_file_path = await asyncio.to_thread(save_temp_file)
+
+        background_tasks.add_task(
+            DocumentService.process_and_ingest_pdf, 
+            temp_file_path, 
+            document_id, 
+            file.filename
+        )
+
         return {
             "document_id": document_id,
-            "filename": safe_filename, # Return safe filename for download endpoint
-            "original_filename": file.filename,
-            "total_chunks": result["total_chunks"],
-            "total_pages": result["total_pages"],
-            "suggested_questions": result["suggested_questions"]
+            "status": "processing",
+            "message": "File uploaded and processing started."
         }
         
-    except ValueError as ve:
-        print(f"Known Processing Error: {str(ve)}")
-        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
-        import uvicorn
-        # Trigger uvicorn reload to fetch new .env values
-        uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
-        import traceback
-        print("\n--- ERROR IN /api/upload ---")
-        traceback.print_exc()
-        print(f"Exception details: {str(e)}")
-        print("----------------------------\n")
-        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
-        
-    finally:
-        # We don't remove the temporary file since we are saving it permanently now for download
-        pass
+        logger.error(f"Upload flow failed: {str(e)}", extra=extra, exc_info=True)
+        await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Storage upload failed")
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to persist document.",
+            headers={"code": "STORAGE_FAILURE"}
+        )
 
-
-@app.get("/api/download/{filename}")
-async def download_pdf(filename: str):
-    """Returns a previously uploaded PDF file"""
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
-    file_path = os.path.join(upload_dir, filename)
-    
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-        
-    return FileResponse(
-        path=file_path,
-        media_type="application/pdf",
-        filename=filename.split("_", 1)[-1], # Strip the UUID for a clean user download name
-        content_disposition_type="inline"
-    )
-
-
-# --- Chat & RAG Setup ---
-from pydantic import BaseModel
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
-from langchain_core.documents import Document
-from typing import List
-
-# Import db connection configuration constants
-from database import MONGO_URI, DB_NAME
-
-class ChatRequest(BaseModel):
-    query: str = "" # Still accepted but safely ignored by backend
-    session_id: str
-    document_id: str
-    user_query: str = ""  
-    mode: str = "chat"
-    language: str = "English"
-    length: str = "medium"
-
-def get_session_history(session_id: str):
-    """Retrieves or creates the chat history for a specific session ID stored in MongoDB."""
-    return MongoDBChatMessageHistory(
-        MONGO_URI, 
-        session_id, 
-        database_name=DB_NAME, 
-        collection_name="chat_histories"
-    )
+@app.get("/api/status/{document_id}")
+async def get_document_status(document_id: str, user=Depends(get_current_user)):
+    """Poll document status securely."""
+    metadata = DocumentManager.get_metadata_for_user(document_id, user.id)
+    if not metadata:
+        raise HTTPException(
+            status_code=404, 
+            detail="Document not found or access denied.",
+            headers={"code": "DOCUMENT_NOT_FOUND"}
+        )
+    return metadata
 
 @app.post("/api/chat")
-async def chat_with_docs(request: ChatRequest):
-    actual_query = request.user_query if request.user_query else request.query
-    if not actual_query:
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-             
+@limiter.limit("5/minute")
+async def chat_with_docs(request: Request, chat_req: dict, user=Depends(get_current_user)):
+    document_id = chat_req.get("document_id")
+    if not document_id:
+        raise HTTPException(status_code=400, detail="document_id is required")
+
+    # Verify ownership and status
+    metadata = DocumentManager.get_metadata_for_user(document_id, user.id)
+    if not metadata:
+        raise HTTPException(status_code=403, detail="Unauthorized access to document", headers={"code": "UNAUTHORIZED"})
+    
+    if metadata.get("status") != "completed":
+        return JSONResponse(
+            status_code=409, 
+            content={"detail": "Document is still processing.", "code": "DOCUMENT_NOT_READY"}
+        )
+
     try:
-        from app.services.router_service import RouterService
-        from app.core.prompts import build_prompt
-        from app.core.document_manager import DocumentManager
-        from app.services.numeric_detector import user_requests_visualization
-        
         router = RouterService()
-        
-        # 1. Fetch cached document metadata
-        metadata = DocumentManager.get_metadata(request.document_id)
-        has_numeric_data = metadata.get("has_numeric_data", True) if metadata else True
-        suggested_chart_type = metadata.get("suggested_chart_type", "bar") if metadata else "bar"
-        
-        # 2. Detect user visualization intent
-        is_chart_requested = user_requests_visualization(actual_query)
-        
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[CHAT] Flags for {request.document_id}: has_numeric_data={has_numeric_data}, is_chart_requested={is_chart_requested}, mode={request.mode}")
-
-        # 3. Securely build prompt on backend based on flags
-        full_safe_query = build_prompt(
-            user_query=actual_query, 
-            mode_str=request.mode, 
-            language=request.language, 
-            length=request.length,
-            has_data=has_numeric_data,
-            suggested_chart_type=suggested_chart_type,
-            is_chart_requested=is_chart_requested
+        result = await asyncio.wait_for(
+            router.route_query(
+                user_query=chat_req.get("user_query", ""),
+                full_query=chat_req.get("query", ""),
+                session_id=chat_req.get("session_id", ""),
+                document_id=document_id,
+                mode=chat_req.get("mode", "chat"),
+                language=chat_req.get("language", "English"),
+                length=chat_req.get("length", "medium")
+            ),
+            timeout=45.0
         )
-
-        # 4. The router handles the decision between RAG and PageIndex
-        result = await router.route_query(
-            user_query=actual_query,
-            full_query=full_safe_query,
-            session_id=request.session_id,
-            document_id=request.document_id,
-            mode=request.mode
+        return result
+    except asyncio.TimeoutError:
+        logger.warning(f"AI Timeout for {document_id}", extra={"doc_id": document_id, "user_id": user.id})
+        return JSONResponse(
+            status_code=504, 
+            content={"detail": "LLM response timed out.", "code": "AI_TIMEOUT"}
         )
-
-        # 5. Construct the public PDF URL
-        filename = metadata.get("original_filename", "document.pdf") if metadata else "document.pdf"
-        safe_filename = f"{request.document_id}_{filename}"
-        pdf_url = f"/api/download/{safe_filename}"
-        
-        # 6. VALIDATION LAYER
-        raw_response = result["response"]
-        context_str = result.get("context_str", "")
-        
-        # Validate charts based on context data availability
-        validated_response = ChartValidator.validate(raw_response, context_str, context_has_data=has_numeric_data)
-        
-        # 7. Post-processing safety: Handling no-data cases
-        if not has_numeric_data:
-            import re
-            recharts_block_pattern = r"```recharts\n.*?\n```"
-            has_recharts = bool(re.search(recharts_block_pattern, validated_response, re.DOTALL))
-            
-            if has_recharts:
-                if is_chart_requested:
-                    # User asked for a chart but no data exists -> show explicit message
-                    no_data_msg = "No structured numeric data found in the document to generate a chart or visualization."
-                    validated_response = re.sub(recharts_block_pattern, no_data_msg, validated_response, flags=re.DOTALL)
-                    logger.info("[CHAT] Replaced hallucinated recharts block with 'no data' message")
-                else:
-                    # Summary mode or general chat -> strip silently
-                    validated_response = re.sub(recharts_block_pattern, "", validated_response, flags=re.DOTALL).strip()
-                    logger.info("[CHAT] Silently stripped hallucinated recharts block (no data in context)")
-        
-        return {
-            "response": validated_response,
-            "pages": result["pages"],
-            "source": result.get("source", "hybrid"),
-            "pdf_url": pdf_url,
-            "session_id": request.session_id,
-            "document_id": request.document_id
-        }
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
-        import traceback
-        error_msg = str(e).lower()
-        print(f"\n--- ERROR IN /api/chat: {str(e)} ---")
-        
-        if "429" in error_msg or "quota" in error_msg or "rate limit" in error_msg:
-            return {"response": "AI Provider Rate Limit reached (Free Tier). This usually means the current model is under high traffic. Please wait 60 seconds or try a different model in your .env file.", "pages": [], "source": "error_rate_limit"}
-            
-        traceback.print_exc()
-        return {"response": "Sorry, I encountered an error while answering that question. Please try again in 30 seconds.", "pages": [], "source": "error"}
+        logger.error(f"Chat failed: {str(e)}", extra={"doc_id": document_id, "user_id": user.id}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal chat error", headers={"code": "CHAT_ERROR"})
 
+@app.get("/api/download/{document_id}")
+async def download_pdf(document_id: str, user=Depends(get_current_user)):
+    """Securely proxy PDF download from Supabase with ownership check."""
+    try:
+        metadata = DocumentManager.get_metadata_for_user(document_id, user.id)
+        if not metadata:
+            raise HTTPException(status_code=404, detail="Document not found", headers={"code": "DOCUMENT_NOT_FOUND"})
+        
+        files = supabase.storage.from_("pdfs").list(path="")
+        target_file = next((f["name"] for f in files if f["name"].startswith(document_id)), None)
+        
+        if not target_file:
+            raise HTTPException(status_code=404, detail="File missing from storage", headers={"code": "FILE_MISSING"})
+            
+        res = supabase.storage.from_("pdfs").create_signed_url(target_file, 3600)
+        return {"url": res["signedURL"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Download failed for {document_id}: {str(e)}", extra={"doc_id": document_id, "user_id": user.id})
+        raise HTTPException(status_code=500, detail="Failed to retrieve download link", headers={"code": "DOWNLOAD_ERROR"})
 
 @app.get("/api/history/{session_id}")
-async def get_chat_history(session_id: str):
-    """Fetch chat history to hydrate the frontend UI on load"""
+async def get_chat_history(session_id: str, user=Depends(get_current_user)):
+    """Fetch chat history with auth verification."""
     try:
-        history = get_session_history(session_id)
-        # Convert Langchain messages to simple dicts for the frontend
+        from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
+        history = MongoDBChatMessageHistory(
+            MONGO_URI, 
+            session_id, 
+            database_name=DB_NAME, 
+            collection_name="chat_histories"
+        )
+        # Note: In a full-scale app, session_id would be tied to user_id in a metadata collection
         formatted_messages = []
         for msg in history.messages:
             formatted_messages.append({
@@ -281,4 +308,5 @@ async def get_chat_history(session_id: str):
             })
         return {"session_id": session_id, "messages": formatted_messages}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"History fetch failed for {session_id}: {str(e)}", extra={"user_id": user.id})
+        raise HTTPException(status_code=500, detail="Failed to retrieve chat history", headers={"code": "HISTORY_ERROR"})

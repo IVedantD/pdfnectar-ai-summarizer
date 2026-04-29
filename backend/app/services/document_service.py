@@ -1,4 +1,7 @@
 import os
+import logging
+import asyncio
+from tenacity import retry, stop_after_attempt, wait_exponential
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI
@@ -7,164 +10,110 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from database import get_vector_store
 from app.core.document_manager import DocumentManager
-import logging
 from app.core.config import (OPENROUTER_API_KEY, OPENROUTER_MODEL, SITE_URL, 
                              SITE_NAME, GROQ_API_KEY, GROQ_MODEL)
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pdfnectar.document_service")
 
 class DocumentService:
     @staticmethod
-    def process_and_ingest_pdf(file_path: str, document_id: str, original_filename: str) -> dict:
-        """Processes a PDF, chunks it, generates embeddings, saves metadata, and generates sample questions."""
-        vectorstore = get_vector_store()
-        
-        # 1. Load the PDF
+    async def process_and_ingest_pdf(file_path: str, document_id: str, original_filename: str):
+        """Processes a PDF with full lifecycle status tracking and error handling."""
+        extra = {"doc_id": document_id}
         try:
-            logger.info("Loading PDF")
-            loader = PyMuPDFLoader(file_path)
-            documents = loader.load()
-            if not documents:
-                raise ValueError("Invalid or unreadable PDF")
-        except Exception as e:
-            logger.error(f"PDF Loading failed: {str(e)}")
-            if isinstance(e, ValueError): raise
-            raise ValueError("Invalid or unreadable PDF")
-
-        # 2. Split the PDF into chunks
-        logger.info("Splitting text")
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,
-            chunk_overlap=300,
-            separators=["\n\n", "\n", "|", " ", ""],
-            add_start_index=True
-        )
-        chunks = text_splitter.split_documents(documents)
-        
-        # 3. Add rich metadata: document_id, source_file, and page
-        for chunk in chunks:
-            page_num = chunk.metadata.get('page', 0)
-            display_page = int(page_num) + 1 if isinstance(page_num, int) else page_num
-            
-            chunk.metadata.update({
-                'document_id': document_id,
-                'source_file': original_filename,
-                'page': display_page
-            })
-
-        # 4. Ingest into MongoDB Vector Store using Gemini Embeddings
-        try:
-            logger.info("Embedding started")
-            vectorstore.add_documents(chunks)
-        except Exception as e:
-            logger.error(f"MongoDB/Embedding failed: {str(e)}")
-            if "pymongo" in str(type(e)).lower() or "timeout" in str(e).lower():
-                raise ValueError("Database connection failed")
-            raise ValueError("Embedding failed")
-
-        # 5. Save metadata using DocumentManager
-        logger.info("Saving document metadata")
-        
-        # Performance: Hybrid sampling for numeric detection (Beginning + Middle + End)
-        sample_chunks = []
-        if len(chunks) <= 10:
-            sample_chunks = chunks
-        else:
-            # First 3
-            sample_chunks.extend(chunks[:3])
-            # Random 3 from middle 50%
-            import random
-            mid_start = int(len(chunks) * 0.25)
-            mid_end = int(len(chunks) * 0.75)
-            if mid_end > mid_start + 3:
-                sample_chunks.extend(random.sample(chunks[mid_start:mid_end], 3))
-            # Last 2
-            sample_chunks.extend(chunks[-2:])
-            
-        sample_text = "\n\n".join([c.page_content for c in sample_chunks])
-        
-        from app.services.numeric_detector import has_numeric_data, detect_chart_type
-        has_data, score = has_numeric_data(sample_text)
-        suggested_type = detect_chart_type(sample_text)
-        
-        logger.info(f"[Ingestion] Document {document_id} detection: has_data={has_data} (score={score}), suggested_type={suggested_type}")
-
-        DocumentManager.save_metadata(document_id, {
-            "original_filename": original_filename,
-            "total_pages": len(documents),
-            "total_chunks": len(chunks),
-            "has_numeric_data": has_data,
-            "suggested_chart_type": suggested_type
-        })
-
-        # 6. Generate Suggested Questions based on the initial chunks
-        suggested_questions = []
-        try:
-            # We take the first 3 chunks (or fewer if the document is very small) as sample context
-            sample_text = "\n\n".join([chunk.page_content for chunk in chunks[:3]])
-            
-            # Use Groq if available, then OpenRouter, then Gemini for questions
-            if GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
-                question_llm = ChatGroq(
-                    model=GROQ_MODEL,
-                    groq_api_key=GROQ_API_KEY,
-                    temperature=0.2,
-                )
-            elif OPENROUTER_API_KEY and OPENROUTER_API_KEY != "YOUR_OPENROUTER_API_KEY":
-                question_llm = ChatOpenAI(
-                    model=OPENROUTER_MODEL,
-                    openai_api_key=OPENROUTER_API_KEY,
-                    openai_api_base="https://openrouter.ai/api/v1",
-                    default_headers={
-                        "HTTP-Referer": SITE_URL,
-                        "X-Title": SITE_NAME,
-                    },
-                    temperature=0.2,
-                )
-            else:
-                # Use a specific known model version if falling back
-                question_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
-            
-            messages = [
-                SystemMessage(content=(
-                    "You are an assistant that helps users understand uploaded documents. "
-                    "Based on the following excerpts from the beginning of a document, generate 3 to 5 insightful "
-                    "questions that a user might want to ask about the text. "
-                    "Output ONLY the questions, with one question per line, starting with a dash (-)."
-                )),
-                HumanMessage(content=f"Document Excerpts:\n{sample_text}")
-            ]
-            
-            response = question_llm.invoke(messages)
-            
-            # Parse the response into a list of strings
-            lines = response.content.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if line.startswith("-") or line.startswith("*"):
-                    question = line[1:].strip()
-                    if question:
-                        suggested_questions.append(question)
-                elif line:
-                     suggested_questions.append(line)
-                     
-            if not suggested_questions:
-                suggested_questions = [
-                    "What is the main purpose of this document?",
-                    "What are the key findings presented?",
-                    "Could you summarize the main points?"
-                ]
+            logger.info(f"Starting background processing for {document_id}", extra=extra)
+            # 1. Load the PDF
+            try:
+                logger.info("Loading PDF", extra=extra)
+                def load_docs():
+                    loader = PyMuPDFLoader(file_path)
+                    return loader.load()
+                documents = await asyncio.to_thread(load_docs)
+                if not documents:
+                    raise ValueError("Invalid or unreadable PDF")
                 
-        except Exception as e:
-            print(f"Warning: Failed to generate suggested questions: {e}")
-            suggested_questions = [
-                "What is the main topic of this document?",
-                "Can you provide a brief summary?",
-                "What are the most important takeaways?"
-            ]
+                # Check page limits immediately
+                max_pages = int(os.getenv("MAX_PDF_PAGES", "100"))
+                doc_pages = len(documents)
+                if doc_pages > max_pages:
+                    logger.warning(f"PDF exceeds page limit: {doc_pages} > {max_pages}", extra=extra)
+                    await asyncio.to_thread(
+                        DocumentManager.update_status, 
+                        document_id, 
+                        "failed", 
+                        error=f"PDF exceeds maximum limit of {max_pages} pages"
+                    )
+                    return
+                    
+            except Exception as e:
+                logger.error(f"PDF Loading failed: {str(e)}", extra=extra, exc_info=True)
+                await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Invalid or unreadable PDF")
+                return
 
-        return {
-            "total_chunks": len(chunks),
-            "total_pages": len(documents),
-            "suggested_questions": suggested_questions[:5] # Enforce max 5
-        }
+            # 2. Split the PDF into chunks
+            logger.info("Splitting text", extra=extra)
+            def split_docs():
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1500,
+                    chunk_overlap=300,
+                    separators=["\n\n", "\n", "|", " ", ""],
+                    add_start_index=True
+                )
+                return text_splitter.split_documents(documents)
+            chunks = await asyncio.to_thread(split_docs)
+            
+            # 3. Add rich metadata
+            for chunk in chunks:
+                page_num = chunk.metadata.get('page', 0)
+                display_page = int(page_num) + 1 if isinstance(page_num, int) else page_num
+                chunk.metadata.update({
+                    'document_id': document_id,
+                    'source_file': original_filename,
+                    'page': display_page
+                })
+
+            # 4. Ingest into Vector Store
+            try:
+                logger.info("Embedding started", extra=extra)
+                vectorstore = get_vector_store()
+                await asyncio.to_thread(vectorstore.add_documents, chunks)
+            except Exception as e:
+                logger.error(f"Embedding failed: {str(e)}", extra=extra, exc_info=True)
+                await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Vector indexing failed")
+                return
+
+            # 5. Extract numeric data and save metadata
+            logger.info("Detecting numeric data", extra=extra)
+            sample_chunks = chunks[:5] # Simple sampling for MVP
+            sample_text = "\n\n".join([c.page_content for c in sample_chunks])
+            
+            from app.services.numeric_detector import has_numeric_data, detect_chart_type
+            has_data, _ = await asyncio.to_thread(has_numeric_data, sample_text)
+            suggested_type = await asyncio.to_thread(detect_chart_type, sample_text)
+            
+            def save_meta():
+                DocumentManager.save_metadata(document_id, {
+                    "original_filename": original_filename,
+                    "total_pages": len(documents),
+                    "total_chunks": len(chunks),
+                    "has_numeric_data": has_data,
+                    "suggested_chart_type": suggested_type,
+                    "suggested_questions": [] # Placeholder
+                })
+            await asyncio.to_thread(save_meta)
+            
+            logger.info(f"Processing completed for {document_id}", extra=extra)
+
+        except Exception as e:
+            logger.error(f"Unexpected background error: {str(e)}", extra=extra, exc_info=True)
+            await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Internal processing error")
+        finally:
+            logger.info("Cleanup done", extra=extra)
+            # Cleanup local temp file
+            if os.path.exists(file_path):
+                try: 
+                    def remove_file():
+                        os.remove(file_path)
+                    await asyncio.to_thread(remove_file)
+                except Exception as cleanup_err:
+                    logger.warning(f"Temp file cleanup failed: {str(cleanup_err)}", extra=extra)

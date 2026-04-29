@@ -80,16 +80,16 @@ class PageIndexService:
         summary = "\n".join([f"Page {p}: {text}..." for p, text in sorted(structural_map.items())])
         return summary
 
-    async def query(self, user_query: str, full_query: str, session_id: str, document_id: str) -> Dict[str, Any]:
+    async def query(self, user_query: str, full_query: str, session_id: str, document_id: str, **kwargs) -> Dict[str, Any]:
         """
         Reasoning-based retrieval:
         1. Understand document structure.
         2. Plan which pages to read.
         3. Retrieve and synthesize.
         """
-        logger.info(f"Starting PageIndex reasoning for query: {user_query}")
+        logger.info(f"Starting PageIndex reasoning for query: {user_query}", extra={"doc_id": document_id})
         
-        # 1. Get Document Map
+        # 1. Get Document Map (Offloaded to thread)
         doc_structure = await self.get_document_structure(document_id)
         
         # 2. Reasoning Step: Plan which pages to fetch
@@ -100,53 +100,78 @@ class PageIndexService:
             "to answer the question thoroughly.\n\n"
             "CRITICAL: Always include pages that look like they contain: Quantitative Data, Tables, "
             "Financial Metrics, Emissions Data, or Executive Summaries if the query asks for overall facts.\n\n"
-            f"Query: {full_query}\n\n"
+            f"Query: {user_query}\n\n"
             f"Document Map (Summaries):\n{doc_structure}\n\n"
             "{format_instructions}\n"
             "Return ONLY the JSON object."
         )
         
-        plan = self.llm.invoke([
-            HumanMessage(content=planner_prompt.format(format_instructions=parser.get_format_instructions()))
-        ])
+        def run_planner():
+            return self.llm.invoke([
+                HumanMessage(content=planner_prompt.format(format_instructions=parser.get_format_instructions()))
+            ])
+
+        plan = await asyncio.to_thread(run_planner)
         
         # Validate plan
         try:
             search_plan = parser.parse(plan.content)
             pages_to_fetch = search_plan.get("selected_pages", [])
-            logger.info(f"PageIndex Reasoning: {search_plan['reasoning']}")
+            logger.info(f"PageIndex Reasoning: {search_plan['reasoning']}", extra={"doc_id": document_id})
         except Exception as e:
-            logger.warning(f"Failed to parse PageIndex plan: {e}. Falling back to top pages.")
+            logger.warning(f"Failed to parse PageIndex plan: {e}. Falling back to top pages.", extra={"doc_id": document_id})
             pages_to_fetch = [1, 2, 3]
 
         if not pages_to_fetch:
             pages_to_fetch = [1]
 
-        # 3. Targeted Retrieval
+        # 3. Targeted Retrieval (Offloaded individually)
         retrieved_docs = []
         for page in pages_to_fetch[:5]: # Max 5 pages
-            page_docs = self.vectorstore.as_retriever(
-                search_kwargs={
-                    "k": 5,
-                    "pre_filter": {
-                        "$and": [
-                            {"document_id": {"$eq": document_id}},
-                            {"page": {"$eq": page}}
-                        ]
+            def fetch_page():
+                return self.vectorstore.as_retriever(
+                    search_kwargs={
+                        "k": 5,
+                        "pre_filter": {
+                            "$and": [
+                                {"document_id": {"$eq": document_id}},
+                                {"page": {"$eq": page}}
+                            ]
+                        }
                     }
-                }
-            ).invoke(user_query)
+                ).invoke(user_query)
+            
+            page_docs = await asyncio.to_thread(fetch_page)
             retrieved_docs.extend(page_docs)
 
-        # 4. Final Synthesis
+        # 4. Final Synthesis via shared prompt logic
         from .rag_service import RAGService
+        from app.core.prompts import build_prompt
+        from app.core.document_manager import DocumentManager
+        
         rag_service = RAGService()
         doc_data = rag_service.group_and_format_docs(retrieved_docs)
         
-        final_answer = self.llm.invoke([
-            SystemMessage(content=rag_service.get_system_prompt().format(context=doc_data["context_str"])),
-            HumanMessage(content=full_query)
-        ]).content
+        # Pull metadata for prompts
+        metadata = await asyncio.to_thread(DocumentManager.get_metadata, document_id)
+        
+        system_prompt = build_prompt(
+            user_query=user_query,
+            mode_str=kwargs.get("mode", "chat"),
+            language=kwargs.get("language", "English"),
+            length=kwargs.get("length", "medium"),
+            has_data=metadata.get("has_numeric_data", False),
+            suggested_chart_type=metadata.get("suggested_chart_type", "bar"),
+            is_chart_requested=any(k in user_query.lower() for k in ["chart", "graph", "table"])
+        )
+        
+        def run_synthesis():
+            return self.llm.invoke([
+                SystemMessage(content=f"{system_prompt}\n\nCONTEXT:\n{doc_data['context_str']}"),
+                HumanMessage(content=user_query)
+            ]).content
+
+        final_answer = await asyncio.to_thread(run_synthesis)
 
         return {
             "response": final_answer,

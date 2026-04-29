@@ -16,6 +16,10 @@ from ..core.config import (MONGO_URI, DB_NAME, GEMINI_MODEL, OPENROUTER_API_KEY,
 
 logger = logging.getLogger(__name__)
 from database import get_vector_store
+from app.core.prompts import build_prompt
+from app.core.document_manager import DocumentManager
+
+logger = logging.getLogger(__name__)
 
 def get_session_history(session_id: str):
     return MongoDBChatMessageHistory(
@@ -37,6 +41,7 @@ class RAGService:
             )
         elif OPENROUTER_API_KEY and OPENROUTER_API_KEY != "YOUR_OPENROUTER_API_KEY":
             logger.info(f"Initializing RAGService with OpenRouter model: {OPENROUTER_MODEL}")
+            # Use ChatOpenAI for OpenRouter
             self.llm = ChatOpenAI(
                 model=OPENROUTER_MODEL,
                 openai_api_key=OPENROUTER_API_KEY,
@@ -55,20 +60,6 @@ class RAGService:
                 max_retries=6, 
             )
         self.vectorstore = get_vector_store()
-
-    def get_system_prompt(self):
-        """Standard System Prompt for PDF Bot"""
-        return (
-            "You are PDF Nectar, an intelligent document analysis assistant. "
-            "Your goal is to provide **structured, highly detailed, and data-driven answers**. \n\n"
-            "STRICT GUIDELINES:\n"
-            "1. **Extract Numeric Data**: Always prioritize specific values (emissions, percentages, currency, dates) over generic text.\n"
-            "2. **Structured Formatting**: Use Markdown (Level 2/3 headers, bold text, and bullet points) to make information readable.\n"
-            "3. **Tone**: Be professional but direct. Use clear icons (e.g., 🌍, 📊, 🧾) for major sections if appropriate.\n"
-            "4. **No Hallucinations**: Only use the provided context. If a value is missing, say so.\n"
-            "5. **Source Citation**: Mention page numbers if available in brackets (e.g., [Page 12]).\n\n"
-            "Context Information:\n{context}"
-        )
 
     def get_retriever(self, document_id: str, k: int = 5):
         return self.vectorstore.as_retriever(
@@ -106,62 +97,79 @@ class RAGService:
             "source_pages": sorted(list(final_pages))
         }
 
-    async def query(self, user_query: str, full_query: str, session_id: str, document_id: str, mode: str = "chat") -> dict:
+    async def query(self, user_query: str, session_id: str, document_id: str, mode: str = "chat", **kwargs) -> dict:
         is_summary = mode == "summary"
+        extra = {"doc_id": document_id, "mode": mode}
         
-        # Use higher k for summaries to capture more diverse content
+        # 1. Fetch document metadata for reasoning calibration
+        metadata = await asyncio.to_thread(DocumentManager.get_metadata, document_id)
+        has_data = metadata.get("has_numeric_data", False)
+        chart_type = metadata.get("suggested_chart_type", "bar")
+        language = kwargs.get("language", "English")
+        length = kwargs.get("length", "medium")
+
+        # 2. Retrieval with eventual consistency protection
         primary_k = 10 if is_summary else 5
         retriever = self.get_retriever(document_id, k=primary_k)
-        search_query = user_query.strip() if user_query.strip() else full_query
         
-        # Atlas Vector Search is eventually consistent. 
-        # If we just uploaded a document, we might need a moment for the index to catch up.
+        # Detect if user is specifically asking for a chart
+        is_chart_requested = any(keyword in user_query.lower() for keyword in ["chart", "graph", "plot", "visualize", "data"])
+        
+        # Use summary-specific search if needed
+        search_query = "overall summary document overview key main points" if is_summary else user_query
+        
         retrieved_docs = []
-        import asyncio
-        for attempt in range(5): # Try up to 5 times (20 seconds)
-            retrieved_docs = retriever.invoke(search_query)
+        for attempt in range(5): 
+            retrieved_docs = await asyncio.to_thread(retriever.invoke, search_query)
             if retrieved_docs:
                 break
             if attempt < 4:
-                logger.info(f"Retrying retrieval for {document_id} (Attempt {attempt+1}/5) - Waiting for Atlas index...")
-                await asyncio.sleep(5) # Wait 5 seconds for Atlas to index
+                logger.info(f"Atlas Search retry {attempt+1}/5 for {document_id}", extra=extra)
+                await asyncio.sleep(4) 
         
         if not retrieved_docs:
             return {
-                "response": "I couldn't find that information in the uploaded document.",
+                "response": "Processing complete, but document content isn't indexed yet. Please wait a moment and try again.",
                 "pages": [],
                 "source": "vector_rag"
             }
 
-        # Secondary retrieval pass: specifically fetch numeric/tabular content
-        # This ensures tables, figures, and statistics are included in the context
-        numeric_query = "numeric data tables figures statistics values emissions percentages financial metrics"
-        numeric_k = 8 if is_summary else 5
-        numeric_retriever = self.get_retriever(document_id, k=numeric_k)
-        try:
-            numeric_docs = numeric_retriever.invoke(numeric_query)
-            
-            # Deduplicate by page_content to avoid sending the same chunk twice
-            existing_contents = set(d.page_content.strip() for d in retrieved_docs)
-            for doc in numeric_docs:
-                if doc.page_content.strip() not in existing_contents:
-                    retrieved_docs.append(doc)
-                    existing_contents.add(doc.page_content.strip())
-            
-            logger.info(f"[RAG] Primary: {primary_k} requested, Numeric: {len(numeric_docs)} found, Total unique: {len(retrieved_docs)}")
-        except Exception as e:
-            logger.warning(f"Secondary numeric retrieval failed (non-fatal): {e}")
+        # 3. Secondary retrieval for numeric context if data exists or chart requested
+        if has_data or is_chart_requested:
+            numeric_query = "numeric data tables figures statistics values financial metrics"
+            numeric_retriever = self.get_retriever(document_id, k=8)
+            try:
+                numeric_docs = await asyncio.to_thread(numeric_retriever.invoke, numeric_query)
+                existing_contents = set(d.page_content.strip() for d in retrieved_docs)
+                for doc in numeric_docs:
+                    if doc.page_content.strip() not in existing_contents:
+                        retrieved_docs.append(doc)
+            except Exception as e:
+                logger.warning(f"Numeric retrieval failed: {e}", extra=extra)
 
         doc_data = self.group_and_format_docs(retrieved_docs)
         
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", self.get_system_prompt()),
+        # 4. Prompt Engineering via core templates
+        system_prompt = build_prompt(
+            user_query=user_query,
+            mode_str=mode,
+            language=language,
+            length=length,
+            has_data=has_data,
+            suggested_chart_type=chart_type,
+            is_chart_requested=is_chart_requested
+        )
+        
+        # Wrap context into system prompt
+        full_system_prompt = f"{system_prompt}\n\nDOCUMENT CONTEXT:\n{doc_data['context_str']}"
+
+        prompt_tmpl = ChatPromptTemplate.from_messages([
+            ("system", full_system_prompt),
             MessagesPlaceholder(variable_name="history"),
             ("human", "{question}"),
         ])
 
-        chain = prompt | self.llm | StrOutputParser()
-        
+        chain = prompt_tmpl | self.llm | StrOutputParser()
         chain_with_history = RunnableWithMessageHistory(
             chain,
             get_session_history,
@@ -169,8 +177,10 @@ class RAGService:
             history_messages_key="history",
         )
         
-        response = chain_with_history.invoke(
-            {"context": doc_data["context_str"], "question": full_query},
+        # 5. LLM Call with history
+        response = await asyncio.to_thread(
+            chain_with_history.invoke,
+            {"question": user_query},
             config={"configurable": {"session_id": session_id}}
         )
         

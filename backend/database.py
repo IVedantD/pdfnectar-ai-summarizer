@@ -1,4 +1,5 @@
 import os
+import logging
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -24,40 +25,38 @@ if not MONGO_URI or not GEMINI_API_KEY:
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 MONGODB_COLLECTION = db[COLLECTION_NAME]
+METADATA_COLLECTION = db["document_metadata"]
+
+logger = logging.getLogger("pdfnectar.database")
 
 # 2. Set up HuggingFace Local Embeddings
-# all-MiniLM-L6-v2 is fast, lightweight (80MB), and completely free to run locally!
-# Lazy-loaded singleton — avoids blocking server startup for 10+ seconds
-DIMENSIONS = 384 # all-MiniLM-L6-v2 outputs 384-dimensional vectors
+DIMENSIONS = 384 
 _embedding_model = None
 
 def get_embedding_model():
     """Returns the HuggingFace embedding model, loading it on first call."""
     global _embedding_model
     if _embedding_model is None:
-        print("Loading HuggingFace embedding model (first request)...")
+        logger.info("Initializing HuggingFace embedding model (all-MiniLM-L6-v2)...")
         _embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        print("Embedding model ready.")
+        logger.info("Embedding model loaded and ready.")
     return _embedding_model
 
 # 3. Implement MongoDBAtlasVectorSearch initialization
 def get_vector_store():
     """Returns the configured MongoDB Atlas Vector Search instance."""
-    vectorstore = MongoDBAtlasVectorSearch(
+    return MongoDBAtlasVectorSearch(
         collection=MONGODB_COLLECTION,
         embedding=get_embedding_model(),
         index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME,
         text_key="text",
         embedding_key="embedding"
     )
-    return vectorstore
 
 def create_search_index():
     """Creates the vector search index on the MongoDB collection."""
-    print("Creating vector search index...")
+    logger.info("Verifying/Creating Atlas Vector Search index...")
     
-    # We use the raw pymongo client to ensure the most robust index definition
-    # for Atlas Vector Search with filtering support.
     try:
         MONGODB_COLLECTION.create_search_index(
             {
@@ -83,10 +82,19 @@ def create_search_index():
                 }
             }
         )
-        print(f"Index '{ATLAS_VECTOR_SEARCH_INDEX_NAME}' creation initiated. Check MongoDB Atlas UI for status.")
+        logger.info(f"Index '{ATLAS_VECTOR_SEARCH_INDEX_NAME}' creation task initiated.")
+        
+        # Add unique index for metadata status tracking
+        METADATA_COLLECTION.create_index("document_id", unique=True)
+        logger.info("Unique index on 'document_id' confirmed.")
     except Exception as e:
-        print(f"Error initiating index creation: {e}")
-        print("If the index already exists, this is normal. Status can be 'FAILED', 'PENDING', or 'READY'.")
+        if "already exists" in str(e).lower():
+            logger.info("Search index already exists.")
+        else:
+            logger.error(f"Error during index verification: {e}")
+
+# Pre-load model at module import level for production readiness
+get_embedding_model()
 
 if __name__ == "__main__":
     create_search_index()
