@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "cd frontend && bun install && bun run dev",
-    "build": "cd frontend && bun install && bun run build",
-    "build:dev": "cd frontend && bun install && bun run build",
+    "build": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
+    "build:dev": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
     "preview": "cd frontend && bun run preview"
   }
 }
