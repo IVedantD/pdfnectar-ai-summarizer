@@ -5,12 +5,15 @@ import LoadingSteps from "@/components/LoadingSteps";
 import SummaryResults from "@/components/SummaryResults";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import { supabase } from "@/integrations/supabase/client";
 import { motion } from "framer-motion";
 import { Loader2, Send } from "lucide-react";
 import ProfileMenu from "@/components/ProfileMenu";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { toast } from "sonner";
 
 type SummaryLength = "short" | "medium" | "detailed";
 type Language = "en" | "hi";
@@ -23,6 +26,7 @@ type ChatMessage = {
   pdfUrl?: string;
 };
 const Index = () => {
+  const navigate = useNavigate();
   const { session, signOut, user } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [length, setLength] = useState<SummaryLength>("medium");
@@ -42,9 +46,6 @@ const Index = () => {
     if (!file || !session) return;
     setState("loading");
     setSummaryText("");
-    
-    const newSessionId = crypto.randomUUID();
-    setSessionId(newSessionId);
     
     try {
       // 1. Upload File
@@ -70,8 +71,10 @@ const Index = () => {
       
       const uploadData = await uploadRes.json();
       const newDocId = uploadData.document_id;
+      const serverSessionId = uploadData.session_id;
       setDocumentId(newDocId);
-      setFilename(uploadData.filename);
+      setFilename(file.name);
+      setSessionId(serverSessionId);
       
       // 2. Poll for Status (Adaptive Polling)
       let isCompleted = false;
@@ -111,7 +114,7 @@ const Index = () => {
         },
         body: JSON.stringify({ 
           user_query: "Summarize this document",
-          session_id: newSessionId,
+          session_id: serverSessionId,
           document_id: newDocId,
           mode: "summary",
           language: languageStr,
@@ -129,8 +132,29 @@ const Index = () => {
       }
       
       const chatData = await chatRes.json();
-      setSummaryText(chatData.response);
+      const responseText = String(chatData.response ?? "");
+      setSummaryText(responseText);
       setState("results");
+
+      if (user?.id && responseText.trim()) {
+        const wordCount = responseText.trim().split(/\s+/).filter(Boolean).length;
+        const readingMinutes = Math.max(1, Math.ceil(wordCount / 200));
+        const { error: historyError } = await supabase.from("pdf_summaries").insert({
+          user_id: user.id,
+          file_name: file.name,
+          file_size: file.size,
+          document_id: newDocId,
+          summary_length: length,
+          language,
+          word_count: wordCount,
+          reading_time: `${readingMinutes} min read`,
+          summary_text: responseText,
+        });
+        if (historyError) {
+          console.error("pdf_summaries insert:", historyError);
+          toast.error("Could not save to history", { description: historyError.message });
+        }
+      }
     } catch (err: any) {
       console.error(err);
       alert(err.message || "An error occurred");
@@ -208,6 +232,11 @@ const Index = () => {
     setState("idle");
   };
 
+  const handleGoHome = () => {
+    handleReset();
+    navigate("/", { replace: true });
+  };
+
   const handleComplete = () => {
     // Optional callback when LoadingSteps finishes its animation loop.
   };
@@ -223,15 +252,25 @@ const Index = () => {
         >
           {/* Profile Menu */}
           <div className="absolute -top-4 right-0 flex items-center gap-2">
-            <ProfileMenu />
+            <ProfileMenu
+              onOpenHistory={(item) => {
+                setSummaryText(item.summaryText);
+                setState("results");
+              }}
+            />
           </div>
 
-          <div className="flex items-center justify-center gap-3 mb-2">
+          <button
+            type="button"
+            onClick={handleGoHome}
+            className="flex items-center justify-center gap-3 mb-2 mx-auto bg-transparent border-0 p-0 cursor-pointer text-foreground hover:opacity-90 transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-md"
+            aria-label="Go to home"
+          >
             <img src={beeLogo} alt="PDFNectar bee logo" className="w-10 h-10" />
-            <h1 className="text-3xl sm:text-4xl font-display font-bold text-foreground tracking-tight">
+            <h1 className="text-3xl sm:text-4xl font-display font-bold tracking-tight">
               PDFNectar.ai
             </h1>
-          </div>
+          </button>
           <p className="text-muted-foreground text-sm sm:text-base">
             Extract notes from any PDF in 30 seconds
           </p>
@@ -316,10 +355,18 @@ const Index = () => {
                       const res = await fetch(`/api/download/${documentId}`, {
                         headers: { "Authorization": `Bearer ${session?.access_token}` }
                       });
-                      if (res.ok) {
-                        const data = await res.json();
-                        window.open(data.url, "_blank");
-                      }
+                      if (!res.ok) throw new Error("Download failed");
+                      const blob = await res.blob();
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      const disposition = res.headers.get("content-disposition") || "";
+                      const match = /filename=\"?([^\";]+)\"?/i.exec(disposition);
+                      a.download = match?.[1] || filename || "document.pdf";
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      window.URL.revokeObjectURL(url);
                     } catch (e) {
                       console.error("Download failed", e);
                     }

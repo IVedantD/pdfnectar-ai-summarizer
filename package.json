@@ -3,12 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "dev": "cd frontend && bun install && bun run dev",
-    "build": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
-    "build:dev": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
-    "preview": "cd frontend && bun run preview"
-  },
-  "dependencies": {
-    "@lovable.dev/cloud-auth-js": "^1.1.2"
+    "dev": "cd frontend && npm install && npm run dev",
+    "build": "cd frontend && npm install && npm run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
+    "build:dev": "cd frontend && npm install && npm run build:dev && cd .. && rm -rf dist && cp -r frontend/dist dist",
+    "preview": "cd frontend && npm run preview"
   }
 }

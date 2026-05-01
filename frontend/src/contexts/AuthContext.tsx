@@ -25,27 +25,24 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     let isMounted = true;
 
-    // Fetch initial session
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log("Auth event:", event);
+      if (!isMounted) return;
+      setSession(session);
+      setLoading(false);
+      if (session && window.location.pathname === "/auth") {
+        window.location.replace("/");
+      }
+    });
+
     supabase.auth.getSession().then(({ data: { session }, error }) => {
       if (error) {
         console.error("Auth session load error:", error);
       }
-      if (isMounted) {
-        setSession(session);
-        setLoading(false);
-      }
-    });
-
-    // Listen to all Auth states (including OAuth redirects implicitly finishing)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log("Auth event:", event);
-      if (isMounted) {
-        setSession(session);
-        // Safely force them to dashboard if they are staring at /auth logged in
-        if (session && window.location.pathname === "/auth") {
-          window.location.replace("/");
-        }
-      }
+      if (!isMounted) return;
+      // Do not overwrite a session the listener already recovered from the OAuth callback URL.
+      setSession((prev) => prev ?? session);
+      setLoading(false);
     });
 
     return () => {

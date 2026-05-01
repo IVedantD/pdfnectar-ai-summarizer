@@ -4,9 +4,10 @@ import uuid
 import logging
 import asyncio
 import time
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Security, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -17,17 +18,28 @@ from slowapi.errors import RateLimitExceeded
 from app.core.logger import setup_logging, CorrelationIdMiddleware, RequestSizeMiddleware
 from app.core.auth import get_current_user
 from app.core.supabase import supabase
+from app.core.supabase import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from app.core.document_manager import DocumentManager
 from app.services.document_service import DocumentService
 from app.services.router_service import RouterService
 from app.services.chart_validator import ChartValidator
 from app.services.numeric_detector import user_requests_visualization
-from database import MONGO_URI, DB_NAME, METADATA_COLLECTION
+from database import (
+    MONGO_URI,
+    DB_NAME,
+    METADATA_COLLECTION,
+    SESSIONS_COLLECTION,
+    CHAT_SESSION_TTL_SECONDS,
+)
+import httpx
 
 # 1. Initialize Logging
 setup_logging()
 logger = logging.getLogger("pdfnectar.main")
 server_start_time = time.time()
+
+_env_name = os.getenv("ENVIRONMENT", os.getenv("ENV", "development")).lower()
+_is_production = _env_name in ("prod", "production")
 
 # 2. Rate Limiting Setup
 def get_user_or_ip(request: Request):
@@ -37,15 +49,27 @@ def get_user_or_ip(request: Request):
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_user_or_ip)
-app = FastAPI(title="PDFNectar AI Summarizer API", version="2.4.0")
+app = FastAPI(
+    title="PDFNectar AI Summarizer API",
+    version="2.4.0",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Public paths that skip the lightweight Bearer pre-parse (OpenAPI only in non-production)
+_AUTH_SKIP_PATHS = {"/api/health", "/", "/docs", "/redoc", "/openapi.json"}
+if _is_production:
+    _AUTH_SKIP_PATHS = {"/api/health", "/"}
+
 
 # 3. Custom Auth Middleware (for Rate Limiting & Pre-auth)
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         # Exclude public paths from pre-auth
-        if request.url.path in ["/api/health", "/", "/docs", "/openapi.json"]:
+        if request.url.path in _AUTH_SKIP_PATHS:
             return await call_next(request)
             
         auth_header = request.headers.get("Authorization")
@@ -66,9 +90,26 @@ app.add_middleware(RequestSizeMiddleware)
 
 # 4. Middleware & Security
 _trusted_hosts_env = os.getenv("TRUSTED_HOSTS", "")
-if _trusted_hosts_env and "*" not in _trusted_hosts_env:
+if _env_name in ("prod", "production"):
+    if not _trusted_hosts_env or "*" in _trusted_hosts_env:
+        raise RuntimeError(
+            "TRUSTED_HOSTS must be set to your domain(s) in production "
+            "(comma-separated, no '*')."
+        )
     ALLOWED_HOSTS = _trusted_hosts_env.split(",")
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+elif _trusted_hosts_env and "*" not in _trusted_hosts_env:
+    ALLOWED_HOSTS = _trusted_hosts_env.split(",")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
+
+def _is_session_expired(created_at: datetime) -> bool:
+    # PyMongo can return naive datetimes depending on client settings.
+    # Treat naive timestamps as UTC to avoid breaking comparisons.
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return created_at < (now - timedelta(seconds=CHAT_SESSION_TTL_SECONDS))
 
 # Restrictive CORS for production
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8080,http://localhost:5173").split(",")
@@ -151,6 +192,12 @@ async def upload_pdf(
     
     # 2. Memory-Safe Buffered Read
     content = await file.read()
+    if not content.startswith(b"%PDF-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid PDF. File signature is not %PDF-.",
+            headers={"code": "INVALID_PDF_SIGNATURE"},
+        )
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(
             status_code=413, 
@@ -159,6 +206,7 @@ async def upload_pdf(
         )
     
     document_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
     logger.info(f"Upload initiated: {file.filename}", extra={**extra, "doc_id": document_id})
 
     # 3. Path Sanitization & Persistence
@@ -167,6 +215,12 @@ async def upload_pdf(
     
     # 4. Atomic Initialization (Primary Record)
     await asyncio.to_thread(DocumentManager.initialize_status, document_id, file.filename, user.id)
+    await asyncio.to_thread(
+        SESSIONS_COLLECTION.update_one,
+        {"session_id": session_id},
+        {"$set": {"session_id": session_id, "user_id": user.id, "document_id": document_id, "created_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
 
     try:
         # 5. Supabase Persistence
@@ -198,6 +252,7 @@ async def upload_pdf(
 
         return {
             "document_id": document_id,
+            "session_id": session_id,
             "status": "processing",
             "message": "File uploaded and processing started."
         }
@@ -227,13 +282,36 @@ async def get_document_status(document_id: str, user=Depends(get_current_user)):
 @limiter.limit("5/minute")
 async def chat_with_docs(request: Request, chat_req: dict, user=Depends(get_current_user)):
     document_id = chat_req.get("document_id")
+    session_id = chat_req.get("session_id")
     if not document_id:
         raise HTTPException(status_code=400, detail="document_id is required")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    session_row = await asyncio.to_thread(
+        SESSIONS_COLLECTION.find_one,
+        {"session_id": session_id},
+        {"_id": 0, "user_id": 1, "document_id": 1, "created_at": 1},
+    )
+    if not session_row or session_row.get("user_id") != user.id or session_row.get("document_id") != document_id:
+        logger.warning(
+            "Invalid session usage",
+            extra={"user_id": user.id, "doc_id": document_id, "req_id": request.state.request_id},
+        )
+        raise HTTPException(status_code=403, detail="Invalid session for this user/document", headers={"code": "INVALID_SESSION"})
+    created_at = session_row.get("created_at")
+    if isinstance(created_at, datetime) and _is_session_expired(created_at):
+        logger.warning(
+            "Expired session usage",
+            extra={"user_id": user.id, "doc_id": document_id, "req_id": request.state.request_id},
+        )
+        raise HTTPException(status_code=403, detail="Session expired", headers={"code": "SESSION_EXPIRED"})
 
     # Verify ownership and status
     metadata = DocumentManager.get_metadata_for_user(document_id, user.id)
     if not metadata:
-        raise HTTPException(status_code=403, detail="Unauthorized access to document", headers={"code": "UNAUTHORIZED"})
+        # 404 prevents document_id enumeration
+        raise HTTPException(status_code=404, detail="Document not found", headers={"code": "DOCUMENT_NOT_FOUND"})
     
     if metadata.get("status") != "completed":
         return JSONResponse(
@@ -247,7 +325,7 @@ async def chat_with_docs(request: Request, chat_req: dict, user=Depends(get_curr
             router.route_query(
                 user_query=chat_req.get("user_query", ""),
                 full_query=chat_req.get("query", ""),
-                session_id=chat_req.get("session_id", ""),
+                session_id=session_id,
                 document_id=document_id,
                 mode=chat_req.get("mode", "chat"),
                 language=chat_req.get("language", "English"),
@@ -267,31 +345,81 @@ async def chat_with_docs(request: Request, chat_req: dict, user=Depends(get_curr
         raise HTTPException(status_code=500, detail="Internal chat error", headers={"code": "CHAT_ERROR"})
 
 @app.get("/api/download/{document_id}")
-async def download_pdf(document_id: str, user=Depends(get_current_user)):
-    """Securely proxy PDF download from Supabase with ownership check."""
+@limiter.limit("5/minute")
+async def download_pdf(request: Request, document_id: str, user=Depends(get_current_user)):
+    """Securely stream PDF download from Supabase Storage with ownership check."""
     try:
         metadata = DocumentManager.get_metadata_for_user(document_id, user.id)
         if not metadata:
             raise HTTPException(status_code=404, detail="Document not found", headers={"code": "DOCUMENT_NOT_FOUND"})
+
+        logger.info("PDF download requested", extra={"doc_id": document_id, "user_id": user.id})
         
         files = supabase.storage.from_("pdfs").list(path="")
         target_file = next((f["name"] for f in files if f["name"].startswith(document_id)), None)
         
         if not target_file:
             raise HTTPException(status_code=404, detail="File missing from storage", headers={"code": "FILE_MISSING"})
-            
-        res = supabase.storage.from_("pdfs").create_signed_url(target_file, 3600)
-        return {"url": res["signedURL"]}
+
+        # Stream object via Storage API using service role key.
+        # This keeps signed URLs out of the browser address bar.
+        storage_url = f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/pdfs/{target_file}"
+
+        # Best-effort filename for download
+        suggested_name = target_file.split("_", 1)[1] if "_" in target_file else f"{document_id}.pdf"
+        safe_name = "".join([c for c in suggested_name if c.isalnum() or c in " ._-"]).strip() or f"{document_id}.pdf"
+
+        headers = {
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        }
+
+        async def iter_bytes():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("GET", storage_url, headers=headers) as r:
+                    if r.status_code != 200:
+                        # Consume body for logging context
+                        body = await r.aread()
+                        logger.error(
+                            f"Storage download failed: {r.status_code} {body[:300]!r}",
+                            extra={"doc_id": document_id, "user_id": user.id},
+                        )
+                        raise HTTPException(status_code=502, detail="Failed to download file from storage", headers={"code": "STORAGE_DOWNLOAD_FAILED"})
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+
+        return StreamingResponse(
+            iter_bytes(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+                "Cache-Control": "no-store",
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Download failed for {document_id}: {str(e)}", extra={"doc_id": document_id, "user_id": user.id})
-        raise HTTPException(status_code=500, detail="Failed to retrieve download link", headers={"code": "DOWNLOAD_ERROR"})
+        raise HTTPException(status_code=500, detail="Failed to download file", headers={"code": "DOWNLOAD_ERROR"})
 
 @app.get("/api/history/{session_id}")
-async def get_chat_history(session_id: str, user=Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def get_chat_history(request: Request, session_id: str, user=Depends(get_current_user)):
     """Fetch chat history with auth verification."""
     try:
+        session_row = await asyncio.to_thread(
+            SESSIONS_COLLECTION.find_one,
+            {"session_id": session_id},
+            {"_id": 0, "user_id": 1, "document_id": 1, "created_at": 1},
+        )
+        if not session_row or session_row.get("user_id") != user.id:
+            logger.warning("Forbidden history access", extra={"user_id": user.id})
+            raise HTTPException(status_code=403, detail="Unauthorized history access", headers={"code": "HISTORY_FORBIDDEN"})
+        created_at = session_row.get("created_at")
+        if isinstance(created_at, datetime) and _is_session_expired(created_at):
+            logger.info("Expired history request", extra={"user_id": user.id})
+            raise HTTPException(status_code=403, detail="Session expired", headers={"code": "SESSION_EXPIRED"})
+
         from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
         history = MongoDBChatMessageHistory(
             MONGO_URI, 
@@ -299,14 +427,13 @@ async def get_chat_history(session_id: str, user=Depends(get_current_user)):
             database_name=DB_NAME, 
             collection_name="chat_histories"
         )
-        # Note: In a full-scale app, session_id would be tied to user_id in a metadata collection
         formatted_messages = []
         for msg in history.messages:
             formatted_messages.append({
                 "role": "user" if msg.type == "human" else "ai",
                 "content": msg.content
             })
-        return {"session_id": session_id, "messages": formatted_messages}
+        return {"session_id": session_id, "document_id": session_row.get("document_id"), "messages": formatted_messages}
     except Exception as e:
         logger.error(f"History fetch failed for {session_id}: {str(e)}", extra={"user_id": user.id})
         raise HTTPException(status_code=500, detail="Failed to retrieve chat history", headers={"code": "HISTORY_ERROR"})

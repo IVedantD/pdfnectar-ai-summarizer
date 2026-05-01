@@ -15,22 +15,30 @@ if "GEMINI_API_KEY" in os.environ and "GOOGLE_API_KEY" not in os.environ:
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "pdfnectar")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "document_embeddings")
-ATLAS_VECTOR_SEARCH_INDEX_NAME = os.getenv("ATLAS_VECTOR_SEARCH_INDEX_NAME", "vector_index")
+ATLAS_VECTOR_SEARCH_INDEX_NAME = os.getenv(
+    "ATLAS_VECTOR_SEARCH_INDEX_NAME", "vector_index"
+)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not MONGO_URI or not GEMINI_API_KEY:
-    raise ValueError("MONGO_URI and GEMINI_API_KEY must be set in the environment variables.")
+    raise ValueError(
+        "MONGO_URI and GEMINI_API_KEY must be set in the environment variables."
+    )
 
 # 1. Configure MongoDB Connection
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 MONGODB_COLLECTION = db[COLLECTION_NAME]
 METADATA_COLLECTION = db["document_metadata"]
+SESSIONS_COLLECTION = db["chat_sessions"]
 
 logger = logging.getLogger("pdfnectar.database")
 
+# Chat session TTL (seconds). Default 24h.
+CHAT_SESSION_TTL_SECONDS = int(os.getenv("CHAT_SESSION_TTL_SECONDS", "86400"))
+
 # 2. Set up HuggingFace Local Embeddings
-DIMENSIONS = 384 
+DIMENSIONS = 384
 _embedding_model = None
 
 def get_embedding_model():
@@ -95,6 +103,21 @@ def create_search_index():
 
 # Pre-load model at module import level for production readiness
 get_embedding_model()
+
+# Ensure basic indexes exist
+try:
+    METADATA_COLLECTION.create_index("document_id", unique=True)
+    SESSIONS_COLLECTION.create_index("session_id", unique=True)
+    SESSIONS_COLLECTION.create_index(
+        [("user_id", 1), ("document_id", 1), ("created_at", -1)]
+    )
+    # TTL index: MongoDB will auto-delete sessions after TTL. Cleanup is approximate.
+    # We still enforce expiration in API handlers.
+    SESSIONS_COLLECTION.create_index(
+        "created_at", expireAfterSeconds=CHAT_SESSION_TTL_SECONDS
+    )
+except Exception as _idx_err:
+    logger.warning("Index creation skipped: %s", _idx_err)
 
 if __name__ == "__main__":
     create_search_index()

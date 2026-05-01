@@ -5,6 +5,42 @@ import type { Database } from './types';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
+function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
+  const parts = jwt.split('.');
+  if (parts.length < 2) return null;
+  const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64 + '=='.slice((base64.length + 3) % 4);
+  try {
+    return JSON.parse(atob(padded)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function projectRefFromSupabaseUrl(url: string): string | null {
+  try {
+    const { hostname } = new URL(url);
+    if (!hostname.endsWith('.supabase.co')) return null;
+    return hostname.replace(/\.supabase\.co$/, '') || null;
+  } catch {
+    return null;
+  }
+}
+
+if (import.meta.env.DEV && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY) {
+  const urlRef = projectRefFromSupabaseUrl(SUPABASE_URL);
+  const keyPayload = decodeJwtPayload(SUPABASE_PUBLISHABLE_KEY);
+  const keyRef = typeof keyPayload?.ref === 'string' ? keyPayload.ref : null;
+  if (urlRef && keyRef && urlRef !== keyRef) {
+    console.error(
+      '[Supabase] VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY are for different projects.',
+      '\n  URL host ref:', urlRef,
+      '\n  Anon JWT ref:', keyRef,
+      '\n  Fix frontend/.env — mismatched values cause GET /auth/v1/user → 401 and immediate SIGNED_OUT after Google login.'
+    );
+  }
+}
+
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 

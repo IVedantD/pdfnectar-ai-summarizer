@@ -18,12 +18,14 @@ export type Database = {
         Row: {
           action_items: Json | null
           created_at: string
+          document_id: string | null
           file_name: string
           file_size: number | null
           id: string
           key_points: Json | null
           language: string
           reading_time: string | null
+          summary_text: string | null
           summary_length: string
           tables_formulas: string | null
           user_id: string
@@ -32,12 +34,14 @@ export type Database = {
         Insert: {
           action_items?: Json | null
           created_at?: string
+          document_id?: string | null
           file_name: string
           file_size?: number | null
           id?: string
           key_points?: Json | null
           language?: string
           reading_time?: string | null
+          summary_text?: string | null
           summary_length?: string
           tables_formulas?: string | null
           user_id: string
@@ -46,12 +50,14 @@ export type Database = {
         Update: {
           action_items?: Json | null
           created_at?: string
+          document_id?: string | null
           file_name?: string
           file_size?: number | null
           id?: string
           key_points?: Json | null
           language?: string
           reading_time?: string | null
+          summary_text?: string | null
           summary_length?: string
           tables_formulas?: string | null
           user_id?: string

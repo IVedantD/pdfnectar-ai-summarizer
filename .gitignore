@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
+*.lockb
 
 # Editor directories and files
 .vscode/*
@@ -39,3 +40,7 @@ venv*/
 
 # Uploads
 backend/uploads/
+
+# Local project notes (do not publish)
+PROJECT_STATUS.md
+project_documentation.md

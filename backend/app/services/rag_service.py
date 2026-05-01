@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import List, Tuple
 from langchain_openai import ChatOpenAI
@@ -20,6 +21,13 @@ from app.core.prompts import build_prompt
 from app.core.document_manager import DocumentManager
 
 logger = logging.getLogger(__name__)
+
+def _escape_prompt_curly_braces(text: str) -> str:
+    """
+    LangChain ChatPromptTemplate treats `{...}` as template variables.
+    Our prompts include JSON examples like `{ "type": "bar" }`, which must be escaped.
+    """
+    return text.replace("{", "{{").replace("}", "}}")
 
 def get_session_history(session_id: str):
     return MongoDBChatMessageHistory(
@@ -162,6 +170,7 @@ class RAGService:
         
         # Wrap context into system prompt
         full_system_prompt = f"{system_prompt}\n\nDOCUMENT CONTEXT:\n{doc_data['context_str']}"
+        full_system_prompt = _escape_prompt_curly_braces(full_system_prompt)
 
         prompt_tmpl = ChatPromptTemplate.from_messages([
             ("system", full_system_prompt),

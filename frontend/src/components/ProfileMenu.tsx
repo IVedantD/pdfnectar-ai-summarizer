@@ -24,6 +24,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface HistoryItem {
   id: string;
+  document_id: string | null;
   file_name: string;
   summary_length: string;
   language: string;
@@ -32,7 +33,19 @@ interface HistoryItem {
   created_at: string;
 }
 
-const ProfileMenu = () => {
+type ProfileMenuProps = {
+  onOpenHistory?: (item: {
+    id: string;
+    documentId: string | null;
+    fileName: string;
+    summaryLength: string;
+    language: string;
+    createdAt: string;
+    summaryText: string;
+  }) => void;
+};
+
+const ProfileMenu = ({ onOpenHistory }: ProfileMenuProps) => {
   const { user, signOut } = useAuth();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -48,7 +61,7 @@ const ProfileMenu = () => {
     setLoading(true);
     const { data, error } = await supabase
       .from("pdf_summaries")
-      .select("id, file_name, summary_length, language, word_count, reading_time, created_at")
+      .select("id, document_id, file_name, summary_length, language, word_count, reading_time, created_at")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false });
     if (error) {
@@ -71,6 +84,41 @@ const ProfileMenu = () => {
     }
     setHistory((prev) => prev.filter((h) => h.id !== id));
     toast({ title: "Deleted", description: "Summary removed from history." });
+  };
+
+  const handleOpen = async (item: HistoryItem) => {
+    if (!onOpenHistory) return;
+    const { data, error } = await supabase
+      .from("pdf_summaries")
+      .select("summary_text")
+      .eq("id", item.id)
+      .single();
+
+    if (error) {
+      toast({ title: "Could not open summary", description: error.message, variant: "destructive" });
+      return;
+    }
+
+    const summaryText = String((data as { summary_text?: unknown } | null)?.summary_text ?? "");
+    if (!summaryText.trim()) {
+      toast({
+        title: "Summary text not stored",
+        description: "This summary was saved before we started storing the full text. Generate it again to add it to history.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setHistoryOpen(false);
+    onOpenHistory({
+      id: item.id,
+      documentId: item.document_id,
+      fileName: item.file_name,
+      summaryLength: item.summary_length,
+      language: item.language,
+      createdAt: item.created_at,
+      summaryText,
+    });
   };
 
   return (
@@ -153,7 +201,13 @@ const ProfileMenu = () => {
                 {history.map((item) => (
                   <li
                     key={item.id}
-                    className="group flex items-start gap-3 p-3 rounded-lg border bg-card hover:bg-accent/30 transition-colors"
+                    className="group flex items-start gap-3 p-3 rounded-lg border bg-card hover:bg-accent/30 transition-colors cursor-pointer"
+                    onClick={() => handleOpen(item)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") handleOpen(item);
+                    }}
                   >
                     <FileText className="w-4 h-4 text-primary shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
@@ -171,7 +225,10 @@ const ProfileMenu = () => {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition"
-                      onClick={() => handleDelete(item.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(item.id);
+                      }}
                       aria-label="Delete summary"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

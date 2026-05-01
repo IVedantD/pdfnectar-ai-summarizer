@@ -1,23 +1,20 @@
 import os
 import logging
 import asyncio
-from tenacity import retry, stop_after_attempt, wait_exponential
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import ChatOpenAI
-from langchain_groq import ChatGroq
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
 from database import get_vector_store
 from app.core.document_manager import DocumentManager
-from app.core.config import (OPENROUTER_API_KEY, OPENROUTER_MODEL, SITE_URL, 
-                             SITE_NAME, GROQ_API_KEY, GROQ_MODEL)
 
 logger = logging.getLogger("pdfnectar.document_service")
 
 class DocumentService:
     @staticmethod
-    async def process_and_ingest_pdf(file_path: str, document_id: str, original_filename: str):
+    async def process_and_ingest_pdf(
+        file_path: str,
+        document_id: str,
+        original_filename: str,
+    ):
         """Processes a PDF with full lifecycle status tracking and error handling."""
         extra = {"doc_id": document_id}
         try:
@@ -25,10 +22,19 @@ class DocumentService:
             # 1. Load the PDF
             try:
                 logger.info("Loading PDF", extra=extra)
+                pdf_parse_timeout_s = float(
+                    os.getenv("PDF_PARSE_TIMEOUT_SECONDS", "20")
+                )
+                max_text_chars = int(
+                    os.getenv("MAX_PDF_TEXT_CHARS", "2000000")
+                )
                 def load_docs():
                     loader = PyMuPDFLoader(file_path)
                     return loader.load()
-                documents = await asyncio.to_thread(load_docs)
+                documents = await asyncio.wait_for(
+                    asyncio.to_thread(load_docs),
+                    timeout=pdf_parse_timeout_s,
+                )
                 if not documents:
                     raise ValueError("Invalid or unreadable PDF")
                 
@@ -36,7 +42,12 @@ class DocumentService:
                 max_pages = int(os.getenv("MAX_PDF_PAGES", "100"))
                 doc_pages = len(documents)
                 if doc_pages > max_pages:
-                    logger.warning(f"PDF exceeds page limit: {doc_pages} > {max_pages}", extra=extra)
+                    logger.warning(
+                        "PDF exceeds page limit: %s > %s",
+                        doc_pages,
+                        max_pages,
+                        extra=extra,
+                    )
                     await asyncio.to_thread(
                         DocumentManager.update_status, 
                         document_id, 
@@ -44,10 +55,41 @@ class DocumentService:
                         error=f"PDF exceeds maximum limit of {max_pages} pages"
                     )
                     return
+
+                # Cap extracted text to avoid pathological PDFs causing memory/compute blowups
+                total_chars = sum(len(d.page_content or "") for d in documents)
+                if total_chars > max_text_chars:
+                    logger.warning(
+                        "PDF text too large: %s > %s",
+                        total_chars,
+                        max_text_chars,
+                        extra=extra,
+                    )
+                    await asyncio.to_thread(
+                        DocumentManager.update_status,
+                        document_id,
+                        "failed",
+                        error="PDF content too large to process safely",
+                    )
+                    return
                     
+            except asyncio.TimeoutError:
+                logger.error("PDF parsing timed out", extra=extra, exc_info=True)
+                await asyncio.to_thread(
+                    DocumentManager.update_status,
+                    document_id,
+                    "failed",
+                    error="PDF parsing timed out",
+                )
+                return
             except Exception as e:
                 logger.error(f"PDF Loading failed: {str(e)}", extra=extra, exc_info=True)
-                await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Invalid or unreadable PDF")
+                await asyncio.to_thread(
+                    DocumentManager.update_status,
+                    document_id,
+                    "failed",
+                    error="Invalid or unreadable PDF",
+                )
                 return
 
             # 2. Split the PDF into chunks
@@ -84,7 +126,7 @@ class DocumentService:
 
             # 5. Extract numeric data and save metadata
             logger.info("Detecting numeric data", extra=extra)
-            sample_chunks = chunks[:5] # Simple sampling for MVP
+            sample_chunks = chunks[:5]  # Simple sampling for MVP
             sample_text = "\n\n".join([c.page_content for c in sample_chunks])
             
             from app.services.numeric_detector import has_numeric_data, detect_chart_type

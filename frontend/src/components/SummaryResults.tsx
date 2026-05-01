@@ -18,6 +18,27 @@ const SummaryResults = ({ summaryText, onDownloadPDF }: SummaryResultsProps) => 
     toast.success("Copied to clipboard!");
   };
 
+  const handleDownloadTxt = () => {
+    const raw = summaryText || "";
+    // TXT export can't render charts; strip `recharts` code blocks to keep it readable.
+    const text = raw
+      .replace(/```recharts[\s\S]*?```/g, "[Chart omitted in TXT export]")
+      .replace(/```[\s\S]*?```/g, (block) => {
+        // Keep non-recharts code blocks as plain text (remove fences).
+        return block.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "");
+      })
+      .trim();
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "summary.txt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   const container = {
     hidden: { opacity: 0 },
     show: { opacity: 1, transition: { staggerChildren: 0.15 } },
@@ -56,7 +77,7 @@ const SummaryResults = ({ summaryText, onDownloadPDF }: SummaryResultsProps) => 
 
       {/* Action buttons */}
       <motion.div variants={item} className="flex gap-3">
-        <Button variant="download" size="sm" className="flex-1">
+        <Button variant="download" size="sm" className="flex-1" onClick={handleDownloadTxt}>
           <FileText className="w-4 h-4" /> TXT
         </Button>
         <Button variant="download" size="sm" className="flex-1" onClick={onDownloadPDF}>
