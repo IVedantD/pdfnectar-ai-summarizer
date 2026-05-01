@@ -6,7 +6,8 @@ import SummaryResults from "@/components/SummaryResults";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
 import { motion } from "framer-motion";
-import { Loader2, LogOut, Send } from "lucide-react";
+import { Loader2, Send } from "lucide-react";
+import ProfileMenu from "@/components/ProfileMenu";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -220,21 +221,9 @@ const Index = () => {
           animate={{ opacity: 1, y: 0 }}
           className="relative text-center mb-8"
         >
-          {/* User Profile / Sign Out */}
+          {/* Profile Menu */}
           <div className="absolute -top-4 right-0 flex items-center gap-2">
-             <div className="hidden sm:flex flex-col items-end">
-                <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Account</span>
-                <span className="text-xs font-semibold truncate max-w-[120px]">{user?.email}</span>
-             </div>
-             <Button 
-                variant="ghost" 
-                size="icon" 
-                className="h-9 w-9 rounded-full hover:bg-destructive/10 hover:text-destructive transition-colors"
-                onClick={() => signOut()}
-                title="Sign out"
-             >
-                <LogOut className="h-4 w-4" />
-             </Button>
+            <ProfileMenu />
           </div>
 
           <div className="flex items-center justify-center gap-3 mb-2">
