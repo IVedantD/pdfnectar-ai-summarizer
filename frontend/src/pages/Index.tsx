@@ -446,9 +446,21 @@ const Index = () => {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.3 }}
-          className="text-center mt-12 text-xs text-muted-foreground"
+          className="text-center mt-12 text-xs text-muted-foreground space-y-1"
         >
-          Free • No signup needed • Powered by AI
+          <p>Powered by AI</p>
+          <p>
+            Built with ❤️ by{" "}
+            <a
+              href="https://github.com/IVedantD"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-primary hover:underline"
+            >
+              Vedant D
+            </a>
+          </p>
+          <p>© {new Date().getFullYear()} PDFNectar.ai. All rights reserved.</p>
         </motion.footer>
       </div>
     </div>
