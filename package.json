@@ -1,0 +1,10 @@
+{
+  "name": "pdfnectar-root",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "cd frontend && bun run dev",
+    "build": "cd frontend && bun run build",
+    "preview": "cd frontend && bun run preview"
+  }
+}
