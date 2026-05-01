@@ -7,5 +7,8 @@
     "build": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
     "build:dev": "cd frontend && bun install && bun run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
     "preview": "cd frontend && bun run preview"
+  },
+  "dependencies": {
+    "@lovable.dev/cloud-auth-js": "^1.1.2"
   }
 }
