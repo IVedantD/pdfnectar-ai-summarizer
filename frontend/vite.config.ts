@@ -4,8 +4,6 @@ import { defineConfig } from "vite";
 
 // https://vitejs.dev/config/
 export default defineConfig(() => ({
-  // Load `.env` from repo root (parent of `frontend/`). Vite’s default is only `frontend/.env`.
-  envDir: path.resolve(__dirname, ".."),
   root: "./", // Explicitly set root to the directory containing index.html
   server: {
     host: "::",

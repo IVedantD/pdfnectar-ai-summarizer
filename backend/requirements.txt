@@ -18,3 +18,4 @@ tenacity
 slowapi
 supabase
 psutil
+gunicorn

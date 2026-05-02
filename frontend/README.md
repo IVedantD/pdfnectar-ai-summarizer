@@ -62,15 +62,19 @@ To run the full stack, you will need two separate terminal windows: one for the 
 
 ### 2. Running the Frontend
 
-1. **Navigate to the project root directory:**
-   Open a new terminal window in the main project folder.
+1. **Navigate to the frontend directory:**
+   ```bash
+   cd frontend
+   ```
 
-2. **Install dependencies (if you haven't already):**
+2. **Copy environment variables** (from `frontend/.env.example` to `frontend/.env`) and fill in your Supabase values.
+
+3. **Install dependencies:**
    ```bash
    npm install
    ```
 
-3. **Start the Vite development server:**
+4. **Start the Vite development server:**
    ```bash
    npm run dev
    ```
