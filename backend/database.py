@@ -54,6 +54,8 @@ def get_embedding_model():
         _embedding_model = HuggingFaceEndpointEmbeddings(
             model="sentence-transformers/all-MiniLM-L6-v2",
             huggingfacehub_api_token=hf_token,
+            # Some versions of the library use this parameter instead
+            huggingface_hub_token=hf_token, 
         )
         logger.info("Inference API Embedding model initialized.")
     return _embedding_model
