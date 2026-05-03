@@ -10,7 +10,6 @@ PyMuPDF
 langchain-community
 python-multipart
 aiofiles
-sentence-transformers
 langchain-huggingface
 langchain-openai==0.3.7
 langchain-groq==0.2.2

@@ -2,7 +2,7 @@ import os
 import logging
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -42,12 +42,20 @@ DIMENSIONS = 384
 _embedding_model = None
 
 def get_embedding_model():
-    """Returns the HuggingFace embedding model, loading it on first call."""
+    """Returns the HuggingFace Inference API embedding model, loading it on first call."""
     global _embedding_model
     if _embedding_model is None:
-        logger.info("Initializing HuggingFace embedding model (all-MiniLM-L6-v2)...")
-        _embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        logger.info("Embedding model loaded and ready.")
+        logger.info("Initializing HuggingFace Inference API embeddings (sentence-transformers/all-MiniLM-L6-v2)...")
+        # Ensure token is set (LangChain will look for HUGGINGFACEHUB_API_TOKEN automatically)
+        hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        if not hf_token:
+            logger.warning("HUGGINGFACEHUB_API_TOKEN not found in environment variables.")
+        
+        _embedding_model = HuggingFaceEndpointEmbeddings(
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            huggingfacehub_api_token=hf_token,
+        )
+        logger.info("Inference API Embedding model initialized.")
     return _embedding_model
 
 # 3. Implement MongoDBAtlasVectorSearch initialization
