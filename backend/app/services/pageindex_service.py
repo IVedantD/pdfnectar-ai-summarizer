@@ -9,7 +9,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 
-from ..core.config import (GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL, 
+from ..core.config import (GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, OPENROUTER_MODEL, 
                            SITE_URL, SITE_NAME, GROQ_API_KEY, GROQ_MODEL)
 from ..core.document_manager import DocumentManager
 from database import get_vector_store
@@ -22,8 +22,15 @@ class SearchPlan(BaseModel):
 
 class PageIndexService:
     def __init__(self):
-        # Use Groq if available, else OpenRouter, else Gemini for PageIndex
-        if GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
+        if GEMINI_API_KEY:
+            logger.info(f"Initializing PageIndexService with Gemini: {GEMINI_MODEL}")
+            self.llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL,
+                google_api_key=GEMINI_API_KEY,
+                temperature=0.1,
+                max_retries=2,
+            )
+        elif GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
             logger.info(f"Initializing PageIndexService with Groq: {GROQ_MODEL}")
             self.llm = ChatGroq(
                 model=GROQ_MODEL,
@@ -43,12 +50,7 @@ class PageIndexService:
                 temperature=0.1,
             )
         else:
-            logger.info(f"Initializing PageIndexService with Gemini: {GEMINI_MODEL}")
-            self.llm = ChatGoogleGenerativeAI(
-                model=GEMINI_MODEL, 
-                temperature=0.1,
-                max_retries=6, 
-            )
+            raise ValueError("GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY is required for chat.")
         self.vectorstore = get_vector_store()
 
     async def get_document_structure(self, document_id: str) -> str:

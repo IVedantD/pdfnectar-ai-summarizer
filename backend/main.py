@@ -342,7 +342,12 @@ async def chat_with_docs(request: Request, chat_req: dict, user=Depends(get_curr
         )
     except Exception as e:
         logger.error(f"Chat failed: {str(e)}", extra={"doc_id": document_id, "user_id": user.id}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal chat error", headers={"code": "CHAT_ERROR"})
+        detail = " ".join(str(e).split())[:180]
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal chat error: {detail}" if detail else "Internal chat error",
+            headers={"code": "CHAT_ERROR"},
+        )
 
 @app.get("/api/download/{document_id}")
 @limiter.limit("5/minute")

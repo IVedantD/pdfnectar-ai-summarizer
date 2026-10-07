@@ -12,7 +12,7 @@ from langchain_core.documents import Document
 from collections import defaultdict
 
 import logging
-from ..core.config import (MONGO_URI, DB_NAME, GEMINI_MODEL, OPENROUTER_API_KEY, 
+from ..core.config import (MONGO_URI, DB_NAME, GEMINI_API_KEY, GEMINI_MODEL, OPENROUTER_API_KEY, 
                            OPENROUTER_MODEL, SITE_URL, SITE_NAME, GROQ_API_KEY, GROQ_MODEL)
 
 logger = logging.getLogger(__name__)
@@ -39,8 +39,17 @@ def get_session_history(session_id: str):
 
 class RAGService:
     def __init__(self):
-        # Use Groq if API key is provided, else fallback to OpenRouter, else Gemini
-        if GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
+        # Gemini first: the same key that just indexed the PDF. Groq and
+        # OpenRouter stay as fallbacks when that key is absent.
+        if GEMINI_API_KEY:
+            logger.info(f"Initializing RAGService with Gemini model: {GEMINI_MODEL}")
+            self.llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL,
+                google_api_key=GEMINI_API_KEY,
+                temperature=0.1,
+                max_retries=2,
+            )
+        elif GROQ_API_KEY and GROQ_API_KEY != "YOUR_GROQ_API_KEY":
             logger.info(f"Initializing RAGService with Groq model: {GROQ_MODEL}")
             self.llm = ChatGroq(
                 model=GROQ_MODEL,
@@ -49,7 +58,6 @@ class RAGService:
             )
         elif OPENROUTER_API_KEY and OPENROUTER_API_KEY != "YOUR_OPENROUTER_API_KEY":
             logger.info(f"Initializing RAGService with OpenRouter model: {OPENROUTER_MODEL}")
-            # Use ChatOpenAI for OpenRouter
             self.llm = ChatOpenAI(
                 model=OPENROUTER_MODEL,
                 openai_api_key=OPENROUTER_API_KEY,
@@ -61,12 +69,7 @@ class RAGService:
                 temperature=0.1,
             )
         else:
-            logger.info(f"Initializing RAGService with Gemini model: {GEMINI_MODEL}")
-            self.llm = ChatGoogleGenerativeAI(
-                model=GEMINI_MODEL, 
-                temperature=0.1,
-                max_retries=6, 
-            )
+            raise ValueError("GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY is required for chat.")
         self.vectorstore = get_vector_store()
 
     def get_retriever(self, document_id: str, k: int = 5):

@@ -10,7 +10,7 @@ This project demonstrates advanced AI engineering and full-stack system design, 
 
 ### 🧠 Intelligent Routing & Dynamic Retrieval
 - **Context-Aware Query Routing:** The `RouterService` dynamically inspects incoming queries and document sizes, routing requests between standard **Vector RAG** (for targeted questions) and a specialized **PageIndex** strategy (for complex, document-wide keyword analysis).
-- **Multi-Model Orchestration:** Employs a fallback model architecture. Prioritizes high-performance models via Groq, falls back to OpenRouter variants, and ultimately to Google Gemini GenAI, ensuring 99.9% availability for LLM generation.
+- **Multi-Model Orchestration:** Summaries are written by Gemini (`gemini-3.6-flash`) with the same API key used for embeddings. Groq and OpenRouter remain fallbacks when that key is absent.
 - **Gemini Embeddings:** Document chunks are embedded with Google `gemini-embedding-001` at 768 dimensions and stored in **MongoDB Atlas Vector Search** for cosine similarity lookup.
 
 ### ⚡ Resilient & Asynchronous Backend
@@ -81,4 +81,4 @@ npm run dev
 2. **Background Ingestion:** A background task extracts text, chunks it, generates 768-dimension embeddings with Gemini, and pushes vectors to MongoDB Atlas.
 3. **Query Analysis:** A user submits a query. The `RouterService` analyzes the prompt complexity and document metadata (e.g. `has_numeric_data`).
 4. **Vector Search:** The system performs a K-NN vector search against MongoDB Atlas. 
-5. **LLM Generation:** The context is packaged into a strict prompt template and fed into the active LLM (Groq -> OpenRouter -> Gemini) for the final response.
+5. **LLM Generation:** The context is packaged into a strict prompt template and sent to Gemini 3.6 Flash for the final response.
