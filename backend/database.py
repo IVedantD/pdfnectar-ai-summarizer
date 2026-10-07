@@ -2,7 +2,7 @@ import os
 import logging
 from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -37,25 +37,17 @@ logger = logging.getLogger("pdfnectar.database")
 # Chat session TTL (seconds). Default 24h.
 CHAT_SESSION_TTL_SECONDS = int(os.getenv("CHAT_SESSION_TTL_SECONDS", "86400"))
 
-# 2. Set up HuggingFace Local Embeddings
-DIMENSIONS = 384
+# 2. Set up Embeddings
+DIMENSIONS = 768
 _embedding_model = None
 
 def get_embedding_model():
-    """Returns the HuggingFace Inference API embedding model, loading it on first call."""
+    """Returns the Gemini embedding model, loading it on first call."""
     global _embedding_model
     if _embedding_model is None:
-        logger.info("Initializing HuggingFace Inference API embeddings (sentence-transformers/all-MiniLM-L6-v2)...")
-        # Ensure token is set (LangChain will look for HUGGINGFACEHUB_API_TOKEN automatically)
-        hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-        if not hf_token:
-            logger.warning("HUGGINGFACEHUB_API_TOKEN not found in environment variables.")
-        
-        _embedding_model = HuggingFaceEndpointEmbeddings(
-            model="sentence-transformers/all-MiniLM-L6-v2",
-            huggingfacehub_api_token=hf_token,
-        )
-        logger.info("Inference API Embedding model initialized.")
+        logger.info("Initializing Gemini embeddings (models/text-embedding-004)...")
+        _embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        logger.info("Embedding model initialized.")
     return _embedding_model
 
 # 3. Implement MongoDBAtlasVectorSearch initialization
