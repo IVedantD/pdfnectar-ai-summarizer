@@ -121,7 +121,13 @@ class DocumentService:
                 await asyncio.to_thread(vectorstore.add_documents, chunks)
             except Exception as e:
                 logger.error(f"Embedding failed: {str(e)}", extra=extra, exc_info=True)
-                await asyncio.to_thread(DocumentManager.update_status, document_id, "failed", error="Vector indexing failed")
+                detail = " ".join(str(e).split())[:180]
+                await asyncio.to_thread(
+                    DocumentManager.update_status,
+                    document_id,
+                    "failed",
+                    error=f"Vector indexing failed: {detail}" if detail else "Vector indexing failed",
+                )
                 return
 
             # 5. Extract numeric data and save metadata
